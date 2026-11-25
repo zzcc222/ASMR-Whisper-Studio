@@ -5,7 +5,7 @@
 #define MyAppName "ASMR Whisper Studio"
 #define MyAppVersion "3.4"
 #define MyAppPublisher "zzcc222"
-#define MyAppURL "https://github.com/zzcc222/Japanese-specific-ASMR-whisper"
+#define MyAppURL "https://github.com/zzcc222/ASMR-Whisper-Studio"
 #define MyAppExeName "ASMR-Whisper-Studio.exe"
 #define AppId "{{E8A42D1C-7F3A-4D5B-9C0E-8A31D45E2026}}"
 
