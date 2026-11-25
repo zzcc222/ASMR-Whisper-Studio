@@ -94,6 +94,7 @@ def parse_subtitle_file(file_path: str) -> List[Dict[str, Any]]:
                                 "start_ms": start_ms,
                                 "end_ms": end_ms,
                                 "text": clean_t,
+                                "raw_ass_text": raw_text.strip(),
                                 "start_str": start_str,
                                 "end_str": end_str,
                             }

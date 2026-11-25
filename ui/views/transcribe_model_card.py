@@ -11,10 +11,12 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QPushButton, QComboBox, QCheckBox, QLineEdit, QFileDialog
+    QPushButton, QComboBox, QCheckBox, QLineEdit, QFileDialog,
+    QListView, QAbstractItemView
 )
 
 from core.cuda_utils import find_local_models
+from ui.workers.gpu_detector import get_recommended_concurrency_label
 
 _app_root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -90,18 +92,106 @@ class TranscribeModelCard(QFrame):
         self.combo_compute.currentTextChanged.connect(_on_comp_user_changed)
         model_grid.addWidget(self.combo_compute, 1, 3)
 
-        # 3. 导出目录选择
-        model_grid.addWidget(QLabel("输出目录:"), 2, 0)
+        # 3. 多任务并发加速策略 (支持 1~16 路并发，覆盖家用显卡至 96GB+ 专业级显卡，带丝滑滚动菜单)
+        model_grid.addWidget(QLabel("并发任务:"), 2, 0)
+        self.combo_concurrency = QComboBox()
+        concurrency_view = QListView(self.combo_concurrency)
+        concurrency_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        concurrency_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        concurrency_view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.combo_concurrency.setView(concurrency_view)
+        self.combo_concurrency.setMaxVisibleItems(6)
+        self.combo_concurrency.setStyleSheet("""
+            QComboBox {
+                combobox-popup: 0;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #FFFFFF;
+                border: 1px solid #E4E4E7;
+                border-radius: 8px;
+                padding: 4px;
+                outline: none;
+                selection-background-color: #F5F3FF;
+                selection-color: #6D28D9;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 28px;
+                padding: 2px 10px;
+                border-radius: 5px;
+                color: #18181B;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #F5F3FF;
+                color: #6D28D9;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #EDE9FE;
+                color: #6D28D9;
+                font-weight: 600;
+            }
+            QComboBox QAbstractItemView QScrollBar:vertical {
+                background: #FAFAFA;
+                width: 7px;
+                margin: 2px 1px 2px 1px;
+                border-radius: 3px;
+            }
+            QComboBox QAbstractItemView QScrollBar::handle:vertical {
+                background: #D4D4D8;
+                min-height: 28px;
+                border-radius: 3px;
+            }
+            QComboBox QAbstractItemView QScrollBar::handle:vertical:hover {
+                background: #8B5CF6;
+            }
+            QComboBox QAbstractItemView QScrollBar::add-line:vertical,
+            QComboBox QAbstractItemView QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+
+        _, auto_label = get_recommended_concurrency_label()
+        self.combo_concurrency.addItem(auto_label, 0)
+        concurrency_tiers = [
+            (1, "1 路并发 (单任务省显存 · ≤8GB)"),
+            (2, "2 路并发 (推荐 12GB~16GB 显存)"),
+            (3, "3 路并发 (推荐 16GB~18GB 充裕显存)"),
+            (4, "4 路并发 (推荐 24GB 显存)"),
+            (5, "5 路并发 (推荐 32GB 显存)"),
+            (6, "6 路并发 (推荐 36GB~40GB 显存)"),
+            (7, "7 路并发 (推荐 42GB~46GB 显存)"),
+            (8, "8 路并发 (推荐 48GB 显存)"),
+            (9, "9 路并发 (推荐 54GB 显存)"),
+            (10, "10 路并发 (推荐 60GB~64GB 显存)"),
+            (11, "11 路并发 (推荐 66GB 显存)"),
+            (12, "12 路并发 (推荐 72GB 显存)"),
+            (13, "13 路并发 (推荐 78GB~80GB 显存)"),
+            (14, "14 路并发 (推荐 84GB 显存)"),
+            (15, "15 路并发 (推荐 90GB 显存)"),
+            (16, "16 路并发 (推荐 ≥96GB 专业显存)"),
+        ]
+        for val, label in concurrency_tiers:
+            self.combo_concurrency.addItem(label, val)
+
+        self.combo_concurrency.setCurrentIndex(0)
+        self.combo_concurrency.setToolTip(
+            "设置批量多文件转录时的并发路数 (支持鼠标滚轮上下滚动选择 1~16 路)：\n"
+            "• 智能自动：按 6GB/任务 与实时剩余显存自动匹配 (家用卡至 96GB+ 专业卡自适应)\n"
+            "• 任意一路任务先完成将立即无缝接力下一个等待文件"
+        )
+        model_grid.addWidget(self.combo_concurrency, 2, 1, 1, 3)
+
+        # 4. 导出目录选择
+        model_grid.addWidget(QLabel("输出目录:"), 3, 0)
         self.edit_output_dir = QLineEdit()
         self.edit_output_dir.setPlaceholderText("默认保存至音频源文件所在目录")
-        model_grid.addWidget(self.edit_output_dir, 2, 1, 1, 2)
+        model_grid.addWidget(self.edit_output_dir, 3, 1, 1, 2)
         self.btn_browse_output = QPushButton("浏览...")
         self.btn_browse_output.clicked.connect(self._on_browse_output)
-        model_grid.addWidget(self.btn_browse_output, 2, 3)
+        model_grid.addWidget(self.btn_browse_output, 3, 3)
 
-        # 4. 字幕导出格式勾选
+        # 5. 字幕导出格式勾选
         lbl_format = QLabel("生成字幕格式:")
-        model_grid.addWidget(lbl_format, 3, 0, Qt.AlignTop | Qt.AlignLeft)
+        model_grid.addWidget(lbl_format, 4, 0, Qt.AlignTop | Qt.AlignLeft)
         fmt_vbox = QVBoxLayout()
         fmt_vbox.setSpacing(6)
 
@@ -144,7 +234,7 @@ class TranscribeModelCard(QFrame):
         fmt_row2.addStretch()
         fmt_vbox.addLayout(fmt_row2)
 
-        model_grid.addLayout(fmt_vbox, 3, 1, 1, 3)
+        model_grid.addLayout(fmt_vbox, 4, 1, 1, 3)
         model_card_layout.addLayout(model_grid)
 
     def _on_device_selection_changed(self, device_text: Optional[str] = None):
@@ -160,6 +250,8 @@ class TranscribeModelCard(QFrame):
                 self.combo_compute.setCurrentText(cur_comp)
             else:
                 self.combo_compute.setCurrentText("int8")
+            if hasattr(self, "combo_concurrency"):
+                self.combo_concurrency.setEnabled(False)
         else:
             self.combo_compute.addItems(["float16", "int8_float16", "int8", "float32"])
             pref = getattr(self, "_preferred_cuda_compute", "float16")
@@ -169,6 +261,8 @@ class TranscribeModelCard(QFrame):
                 self.combo_compute.setCurrentText(pref)
             else:
                 self.combo_compute.setCurrentText("float16")
+            if hasattr(self, "combo_concurrency"):
+                self.combo_concurrency.setEnabled(True)
         self.combo_compute.blockSignals(False)
 
         # 通知主窗体更新 GPU 状态标签
@@ -200,6 +294,9 @@ class TranscribeModelCard(QFrame):
         self.btn_open_model_dir.setEnabled(enabled)
         self.combo_device.setEnabled(enabled)
         self.combo_compute.setEnabled(enabled)
+        if hasattr(self, "combo_concurrency"):
+            is_cpu = (self.combo_device.currentText().strip().lower() == "cpu")
+            self.combo_concurrency.setEnabled(enabled and not is_cpu)
         self.edit_output_dir.setEnabled(enabled)
         self.btn_browse_output.setEnabled(enabled)
         self.chk_srt.setEnabled(enabled)

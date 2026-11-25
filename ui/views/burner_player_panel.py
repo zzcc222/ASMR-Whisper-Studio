@@ -20,6 +20,7 @@ from ui.components.video_preview import VideoSubtitleWidget
 from ui.components.audio_timeline import AudioSubtitleTimelineWidget
 from ui.views.burner_ctrl_bar import BurnerCtrlBar
 from ui.views.burner_sub_list_card import BurnerSubListCard
+from ui.views.burner_media_spec_bar import TimelineDialogueBanner, MediaSpecBar
 from core.media.media_probe import probe_media_info, format_channel_layout
 from core.subtitle.subtitle_parser import parse_subtitle_file
 from core.subtitle.subtitle_exporter import format_timestamp, save_subtitle_items
@@ -165,118 +166,22 @@ class BurnerPlayerPanel(QObject):
         self.timeline_widget.sig_zoom_changed.connect(self._on_timeline_zoom_changed)
         card_tl_layout.addWidget(self.timeline_widget)
 
-        banner_sub = QFrame()
-        banner_sub.setObjectName("banner_sub")
-        banner_sub.setFixedHeight(34)
-        banner_sub.setStyleSheet("""
-            QFrame#banner_sub {
-                background-color: #F8F9FB;
-                border: 1px solid #E4E4E7;
-                border-radius: 8px;
-            }
-            QFrame#banner_sub QLabel {
-                border: none;
-                background: transparent;
-            }
-        """)
-        banner_sub_layout = QHBoxLayout(banner_sub)
-        banner_sub_layout.setContentsMargins(10, 0, 10, 0)
-        banner_sub_layout.setSpacing(6)
-
-        lbl_dialogue_icon = QLabel("💬")
-        lbl_dialogue_icon.setStyleSheet("border: none; background: transparent;")
-        banner_sub_layout.addWidget(lbl_dialogue_icon)
-
-        self.lbl_sub_text_preview = QLabel("未载入字幕文件（可点击右侧「浏览」或直接拖拽音视频与字幕）")
-        self.lbl_sub_text_preview.setStyleSheet("color: #A1A1AA; font-size: 11.5px; border: none; background: transparent;")
-        banner_sub_layout.addWidget(self.lbl_sub_text_preview, 1)
-
-        self.btn_replay_sub = QPushButton("🔄 重播此句")
-        self.btn_replay_sub.setStyleSheet("padding: 2px 8px; font-size: 11px; border-radius: 6px; background-color: #FFFFFF; border: 1px solid #E4E4E7;")
-        self.btn_replay_sub.setEnabled(False)
+        self.banner_sub = TimelineDialogueBanner(card_timeline)
+        self.lbl_sub_text_preview = self.banner_sub.lbl_sub_text_preview
+        self.btn_replay_sub = self.banner_sub.btn_replay_sub
         self.btn_replay_sub.clicked.connect(self._replay_current_sub)
-        banner_sub_layout.addWidget(self.btn_replay_sub)
-        card_tl_layout.addWidget(banner_sub)
+        card_tl_layout.addWidget(self.banner_sub)
 
         left_layout.addWidget(card_timeline, 0)
 
-        # 3. 规格参数指示条 (4 大信息区块)
-        self.spec_panel = QFrame()
-        self.spec_panel.setObjectName("media_spec_panel")
-        self.spec_panel.setFixedHeight(38)
-        self.spec_panel.setStyleSheet("""
-            QFrame#media_spec_panel {
-                background-color: #FFFFFF;
-                border: 1px solid #E4E4E7;
-                border-radius: 10px;
-            }
-            QFrame#media_spec_panel QLabel {
-                border: none;
-                background: transparent;
-            }
-        """)
-        spec_hbox = QHBoxLayout(self.spec_panel)
-        spec_hbox.setContentsMargins(14, 0, 14, 0)
-        spec_hbox.setSpacing(10)
-
-        def make_v_divider():
-            div = QFrame()
-            div.setFixedWidth(1)
-            div.setFixedHeight(14)
-            div.setStyleSheet("background-color: #E4E4E7; border: none;")
-            return div
-
-        # 区块 1: 视频轨信息
-        lbl_v_icon_title = QLabel("🎬 视频")
-        lbl_v_icon_title.setStyleSheet("color: #71717A; font-size: 11px; font-weight: 600;")
-        spec_hbox.addWidget(lbl_v_icon_title)
-
-        self.lbl_v_codec = QLabel("未载入")
-        self.lbl_v_codec.setStyleSheet("color: #18181B; font-size: 11px; font-weight: 600; background-color: #F4F4F5; border-radius: 4px; padding: 2px 6px;")
-        spec_hbox.addWidget(self.lbl_v_codec)
-
-        self.lbl_v_res_fps = QLabel("-- × -- | -- FPS")
-        self.lbl_v_res_fps.setStyleSheet("color: #52525B; font-size: 11px; font-weight: 500;")
-        spec_hbox.addWidget(self.lbl_v_res_fps)
-
-        spec_hbox.addWidget(make_v_divider())
-
-        # 区块 2: 音频轨信息
-        lbl_a_icon_title = QLabel("🔊 音频")
-        lbl_a_icon_title.setStyleSheet("color: #71717A; font-size: 11px; font-weight: 600;")
-        spec_hbox.addWidget(lbl_a_icon_title)
-
-        self.lbl_a_codec = QLabel("未载入")
-        self.lbl_a_codec.setStyleSheet("color: #18181B; font-size: 11px; font-weight: 600; background-color: #F4F4F5; border-radius: 4px; padding: 2px 6px;")
-        spec_hbox.addWidget(self.lbl_a_codec)
-
-        self.lbl_a_rate_ch = QLabel("--")
-        self.lbl_a_rate_ch.setStyleSheet("color: #52525B; font-size: 11px; font-weight: 500;")
-        spec_hbox.addWidget(self.lbl_a_rate_ch)
-
-        spec_hbox.addWidget(make_v_divider())
-
-        # 区块 3: 媒体时长
-        lbl_dur_icon_title = QLabel("⏱️ 时长")
-        lbl_dur_icon_title.setStyleSheet("color: #71717A; font-size: 11px; font-weight: 600;")
-        spec_hbox.addWidget(lbl_dur_icon_title)
-
-        self.lbl_total_dur = QLabel("--:--")
-        self.lbl_total_dur.setStyleSheet("color: #18181B; font-size: 11.5px; font-weight: 600; font-family: monospace;")
-        spec_hbox.addWidget(self.lbl_total_dur)
-
-        spec_hbox.addWidget(make_v_divider())
-
-        # 区块 4: 字幕状态
-        lbl_sub_icon_title = QLabel("💬 字幕")
-        lbl_sub_icon_title.setStyleSheet("color: #71717A; font-size: 11px; font-weight: 600;")
-        spec_hbox.addWidget(lbl_sub_icon_title)
-
-        self.lbl_sub_status = QLabel("未载入")
-        self.lbl_sub_status.setStyleSheet("color: #A1A1AA; font-size: 11px; font-weight: 500;")
-        spec_hbox.addWidget(self.lbl_sub_status)
-
-        spec_hbox.addStretch()
+        # 3. 规格参数指示条 (4 大信息区块，解耦为 MediaSpecBar)
+        self.spec_panel = MediaSpecBar(self.left_container)
+        self.lbl_v_codec = self.spec_panel.lbl_v_codec
+        self.lbl_v_res_fps = self.spec_panel.lbl_v_res_fps
+        self.lbl_a_codec = self.spec_panel.lbl_a_codec
+        self.lbl_a_rate_ch = self.spec_panel.lbl_a_rate_ch
+        self.lbl_total_dur = self.spec_panel.lbl_total_dur
+        self.lbl_sub_status = self.spec_panel.lbl_sub_status
         left_layout.addWidget(self.spec_panel, 0)
 
     def _init_sub_list_card(self):
@@ -310,7 +215,7 @@ class BurnerPlayerPanel(QObject):
         self._parsed_sub_starts = [int(s["start_ms"]) for s in self.parsed_subtitles]
         cnt = len(self.parsed_subtitles)
         self.timeline_widget.set_subtitles(self.parsed_subtitles)
-        self.sub_list_card.populate_items(self.parsed_subtitles, keep_dirty=True)
+        self.sub_list_card.refresh_items_in_place(self.parsed_subtitles, keep_dirty=True)
         self.lbl_sub_count_badge.setText(f"总计: {cnt} 句" if cnt > 0 else "")
         if self.current_sub_path:
             ext_name = os.path.splitext(self.current_sub_path)[1].upper().replace(".", "")

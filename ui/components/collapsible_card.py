@@ -226,15 +226,22 @@ class CollapsibleCard(QFrame):
     drawer_height = Property(int, _get_drawer_height, _set_drawer_height)
 
     def _measure_target_height(self) -> int:
-        """精确测量抽屉完全展开时的自然高度，保持内部布局稳定"""
+        """精确测量抽屉完全展开时的自然高度，严格对齐 HeightForWidth 防止展开末端膨胀回弹"""
         self.content_holder.setMinimumHeight(0)
         self.content_holder.setMaximumHeight(16777215)
-        avail_w = max(100, self.width() - 2)
-        if self.content_holder.width() <= 100 and avail_w > 100:
+        avail_w = max(
+            100,
+            self.drawer_widget.width() if self.drawer_widget.width() > 100 else (self.width() - 2),
+        )
+        if self.content_holder.width() != avail_w and avail_w > 100:
             self.content_holder.resize(avail_w, self.content_holder.height())
         self.drawer_layout.activate()
-        hint_h = max(self.drawer_layout.sizeHint().height(), self.content_holder.sizeHint().height())
-        return max(hint_h, 60)
+        min_h = self.drawer_layout.totalMinimumSize().height()
+        if self.drawer_layout.hasHeightForWidth():
+            hfw = self.drawer_layout.totalHeightForWidth(avail_w)
+            return max(min_h, hfw, 60)
+        hint_h = max(self.drawer_layout.totalSizeHint().height(), self.content_holder.sizeHint().height())
+        return max(min_h, hint_h, 60)
 
     def showEvent(self, event):
         super().showEvent(event)

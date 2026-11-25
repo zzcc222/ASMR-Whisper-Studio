@@ -15,165 +15,8 @@ from PySide6.QtWidgets import (
     QMenu
 )
 
-from core.subtitle.subtitle_parser import parse_time_to_ms
 from core.subtitle.subtitle_exporter import format_timestamp
-
-
-class SubtitleEditDialog(QDialog):
-    """极简高颜值字幕单句微调弹窗 (支持起止时间轴毫秒微调与台词文本修正)"""
-
-    def __init__(self, sub_data: Dict[str, Any], index: int = 0, parent: QWidget = None):
-        super().__init__(parent)
-        self.setWindowTitle(f"✏️ 微调第 #{index + 1} 句字幕")
-        self.setMinimumWidth(460)
-        self.sub_data = dict(sub_data)
-        self._init_ui(index)
-
-    def _init_ui(self, index: int):
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #FFFFFF;
-                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
-            }
-            QLabel {
-                color: #18181B;
-                font-size: 12px;
-                background: transparent;
-            }
-            QLineEdit {
-                background-color: #F8FAFC;
-                border: 1px solid #E4E4E7;
-                border-radius: 8px;
-                padding: 7px 10px;
-                color: #18181B;
-                font-size: 12.5px;
-            }
-            QLineEdit:focus {
-                border: 1.5px solid #8B5CF6;
-                background-color: #FFFFFF;
-            }
-            QPushButton {
-                background-color: #F4F4F5;
-                border: 1px solid #E4E4E7;
-                border-radius: 7px;
-                padding: 5px 10px;
-                color: #18181B;
-                font-size: 11.5px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #F5F3FF;
-                border-color: #C4B5FD;
-                color: #6D28D9;
-            }
-            QPushButton#BtnSaveDialog {
-                background-color: #8B5CF6;
-                border: none;
-                color: #FFFFFF;
-                padding: 7px 18px;
-                font-weight: 700;
-            }
-            QPushButton#BtnSaveDialog:hover {
-                background-color: #7C3AED;
-            }
-        """)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(12)
-
-        lbl_head = QLabel(f"正在编辑第 #{index + 1} 句台词与时间轴")
-        lbl_head.setStyleSheet("font-size: 13.5px; font-weight: 700; color: #18181B;")
-        layout.addWidget(lbl_head)
-
-        # 起始时间行
-        row_start = QHBoxLayout()
-        lbl_s = QLabel("起始时间:")
-        lbl_s.setFixedWidth(64)
-        self.edit_start = QLineEdit(str(self.sub_data.get("start_str", "0:00:00.00")))
-        btn_s_minus = QPushButton("-0.1s")
-        btn_s_plus = QPushButton("+0.1s")
-        btn_s_minus.clicked.connect(lambda: self._shift_time(self.edit_start, -100))
-        btn_s_plus.clicked.connect(lambda: self._shift_time(self.edit_start, 100))
-        row_start.addWidget(lbl_s)
-        row_start.addWidget(self.edit_start, 1)
-        row_start.addWidget(btn_s_minus)
-        row_start.addWidget(btn_s_plus)
-        layout.addLayout(row_start)
-
-        # 结束时间行
-        row_end = QHBoxLayout()
-        lbl_e = QLabel("结束时间:")
-        lbl_e.setFixedWidth(64)
-        self.edit_end = QLineEdit(str(self.sub_data.get("end_str", "0:00:02.00")))
-        btn_e_minus = QPushButton("-0.1s")
-        btn_e_plus = QPushButton("+0.1s")
-        btn_e_minus.clicked.connect(lambda: self._shift_time(self.edit_end, -100))
-        btn_e_plus.clicked.connect(lambda: self._shift_time(self.edit_end, 100))
-        row_end.addWidget(lbl_e)
-        row_end.addWidget(self.edit_end, 1)
-        row_end.addWidget(btn_e_minus)
-        row_end.addWidget(btn_e_plus)
-        layout.addLayout(row_end)
-
-        # 台词文本行
-        lbl_t = QLabel("台词文本:")
-        layout.addWidget(lbl_t)
-        self.edit_text = QLineEdit(str(self.sub_data.get("text", "")))
-        self.edit_text.setPlaceholderText("请输入字幕台词内容...")
-        layout.addWidget(self.edit_text)
-
-        self.lbl_err = QLabel("")
-        self.lbl_err.setStyleSheet("color: #EF4444; font-size: 11px;")
-        self.lbl_err.hide()
-        layout.addWidget(self.lbl_err)
-
-        # 底部按钮
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        btn_cancel = QPushButton("取消")
-        btn_cancel.clicked.connect(self.reject)
-        btn_ok = QPushButton("确定修改")
-        btn_ok.setObjectName("BtnSaveDialog")
-        btn_ok.setDefault(True)
-        btn_ok.clicked.connect(self._on_accept)
-        btn_row.addWidget(btn_cancel)
-        btn_row.addWidget(btn_ok)
-        layout.addLayout(btn_row)
-
-        self.edit_text.setFocus()
-        self.edit_text.selectAll()
-
-    def _shift_time(self, line_edit: QLineEdit, delta_ms: int):
-        ms = parse_time_to_ms(line_edit.text())
-        if ms is None:
-            ms = 0
-        new_ms = max(0, ms + delta_ms)
-        fmt = "srt" if "," in line_edit.text() else "ass"
-        line_edit.setText(format_timestamp(new_ms / 1000.0, fmt))
-
-    def _on_accept(self):
-        s_ms = parse_time_to_ms(self.edit_start.text())
-        e_ms = parse_time_to_ms(self.edit_end.text())
-        txt = self.edit_text.text().strip()
-        if s_ms is None or e_ms is None:
-            self.lbl_err.setText("⚠️ 时间格式无效，请使用 H:MM:SS.cc 或 HH:MM:SS,mmm 格式")
-            self.lbl_err.show()
-            return
-        if e_ms <= s_ms:
-            self.lbl_err.setText("⚠️ 结束时间必须大于起始时间")
-            self.lbl_err.show()
-            return
-        if not txt:
-            self.lbl_err.setText("⚠️ 台词内容不能为空")
-            self.lbl_err.show()
-            return
-        fmt = "srt" if "," in self.edit_start.text() else "ass"
-        self.sub_data["start_ms"] = s_ms
-        self.sub_data["end_ms"] = e_ms
-        self.sub_data["start_str"] = format_timestamp(s_ms / 1000.0, fmt)
-        self.sub_data["end_str"] = format_timestamp(e_ms / 1000.0, fmt)
-        self.sub_data["text"] = txt
-        self.accept()
+from ui.dialogs import SubtitleEditDialog
 
 
 class BurnerSubListCard(QFrame):
@@ -499,6 +342,10 @@ class BurnerSubListCard(QFrame):
             lbl_txt.setWordWrap(True)
             c_layout.addWidget(lbl_txt, 1)
 
+            card._lbl_idx = lbl_idx
+            card._time_badge = time_badge
+            card._lbl_txt = lbl_txt
+
             item.setSizeHint(card.sizeHint())
             item.setData(Qt.UserRole, s)
             self.list_subtitles.addItem(item)
@@ -507,6 +354,34 @@ class BurnerSubListCard(QFrame):
         # 若搜索框有过滤词，保持过滤状态
         if self.edit_sub_search.text().strip():
             self.filter_items(self.edit_sub_search.text())
+
+    def refresh_items_in_place(self, items: List[Dict[str, Any]], keep_dirty: bool = True) -> bool:
+        """当字幕条目数量未变时原地增量更新各行标签与数据，避免全表销毁重建导致的闪烁"""
+        if not isinstance(items, list) or len(items) == 0 or len(items) != self.list_subtitles.count():
+            self.populate_items(items, keep_dirty=keep_dirty)
+            return False
+
+        self._items_ref = items
+        if not keep_dirty:
+            self._update_save_btn_style(False)
+
+        for idx, s in enumerate(self._items_ref):
+            item = self.list_subtitles.item(idx)
+            if item is None:
+                continue
+            item.setData(Qt.UserRole, s)
+            card = self.list_subtitles.itemWidget(item)
+            if card is not None and hasattr(card, "_lbl_idx"):
+                card._lbl_idx.setText(f"#{idx + 1}")
+                card._time_badge.setText(f"{s['start_str']} → {s['end_str']}")
+                card._lbl_txt.setText(s["text"])
+                item.setSizeHint(card.sizeHint())
+
+        if self.edit_sub_search.text().strip():
+            self.filter_items(self.edit_sub_search.text())
+        else:
+            self.lbl_sub_list_badge.setText(f"共 {len(self._items_ref)} 句")
+        return True
 
     def filter_items(self, query: str):
         """根据关键词实时过滤字幕列表"""

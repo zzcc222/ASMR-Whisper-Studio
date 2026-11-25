@@ -60,13 +60,6 @@ class AudioSubtitleTimelineWidget(QWidget):
         self._cached_glow_poly: Optional[QPolygonF] = None
         self._cached_virtual_w: int = 0
 
-        # 初始未载入媒体状态：波形与字幕数据保持清空
-        self.total_dur_ms = 0
-        self.current_pos_ms = 0
-        self.peaks = []
-        self.subtitles = []
-        self._sub_starts = []
-
     def set_duration(self, dur_ms: int):
         self.total_dur_ms = max(0, dur_ms)
         self._recalculate_wave_geometry()

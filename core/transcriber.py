@@ -4,7 +4,7 @@ ASMR Whisper Studio - core.transcriber 核心统一聚合导出门面
 """
 
 from core.cuda_utils import setup_cuda_dll_paths, find_local_models, resolve_model_path
-from core.text_cleaner import (
+from core.nlp.text_cleaner import (
     clean_sub_text,
     is_pure_punctuation_or_noise,
     is_repetitive_hallucination,
@@ -12,12 +12,12 @@ from core.text_cleaner import (
     PUNCTUATION_AND_NOISE_PATTERN,
     REPETITION_STRIP_REGEX,
 )
-from core.r18_cleaner import (
+from core.nlp.r18_cleaner import (
     clean_r18_segments,
     is_pure_moan_or_sound,
     normalize_text_core,
 )
-from core.subtitle_exporter import (
+from core.subtitle.subtitle_exporter import (
     format_timestamp,
     export_subtitles,
     write_custom_ass,

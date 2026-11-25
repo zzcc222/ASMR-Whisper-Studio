@@ -6,7 +6,7 @@ ASMR Whisper Studio - 设置双路持久化与配置同步服务 (SettingsSync)
 
 from PySide6.QtWidgets import QApplication
 from core.config import SettingsManager
-from core.prompt_parser import DEFAULT_CUSTOM_PRESETS
+from core.nlp.prompt_parser import DEFAULT_CUSTOM_PRESETS
 
 
 class SettingsSync:
@@ -33,11 +33,15 @@ class SettingsSync:
                 if hasattr(win.sub_burner_tab.player_panel, "slider_volume"):
                     player_vol = int(win.sub_burner_tab.player_panel.slider_volume.value())
 
+            is_offscreen = (QApplication.platformName() == "offscreen")
+            use_saved_size = win.isMaximized() or is_offscreen or not win.isVisible()
+
             cfg = {
                 "model_text": win.combo_model.currentText(),
                 "model_data": win.combo_model.currentData(),
                 "compute_type": win.combo_compute.currentText(),
                 "device": win.combo_device.currentText(),
+                "concurrent_tasks": int(win.combo_concurrency.currentData() or 0) if hasattr(win, "combo_concurrency") else 0,
                 "output_dir": win.edit_output_dir.text().strip(),
                 "export_srt": win.chk_srt.isChecked(),
                 "export_ass": win.chk_ass.isChecked(),
@@ -55,8 +59,8 @@ class SettingsSync:
                 "initial_prompt": win.edit_prompt.text(),
                 "card_r18_expanded": r18_exp,
                 "card_vad_expanded": vad_exp,
-                "window_width": win.width() if not win.isMaximized() else getattr(win, "_saved_window_w", 1920),
-                "window_height": win.height() if not win.isMaximized() else getattr(win, "_saved_window_h", 1080),
+                "window_width": getattr(win, "_saved_window_w", 1920) if use_saved_size else win.width(),
+                "window_height": getattr(win, "_saved_window_h", 1080) if use_saved_size else win.height(),
                 "window_maximized": win.isMaximized(),
                 "active_main_tab": active_tab,
                 "player_volume": player_vol,
@@ -115,6 +119,12 @@ class SettingsSync:
                 if hasattr(win, "config_panel") and hasattr(win.config_panel, "model_card"):
                     if dev != "cpu":
                         win.config_panel.model_card._preferred_cuda_compute = comp
+
+            if "concurrent_tasks" in cfg and hasattr(win, "combo_concurrency"):
+                cc_val = int(cfg.get("concurrent_tasks", 0) or 0)
+                cc_idx = win.combo_concurrency.findData(cc_val)
+                if cc_idx != -1:
+                    win.combo_concurrency.setCurrentIndex(cc_idx)
 
             if "output_dir" in cfg and cfg["output_dir"]:
                 win.edit_output_dir.setText(str(cfg["output_dir"]))
@@ -254,18 +264,21 @@ class SettingsSync:
                 if active_tab in (0, 1):
                     win._switch_main_tab(active_tab, animated=False)
 
-            # 还原窗口尺寸，支持用户自定义缩放（以 minimumWidth/minimumHeight 为下限，不再强制锁死 1920x1080）
+            # 还原窗口尺寸，支持用户自定义缩放（自动修复曾被 offscreen 800x800 虚拟屏污染的 1020x800 异常值）
             saved_w = cfg.get("window_width")
             saved_h = cfg.get("window_height")
+            if saved_w == 1020 and saved_h == 800:
+                saved_w, saved_h = 1920, 1080
             if saved_w and saved_h:
                 app = QApplication.instance()
-                screen = app.primaryScreen() if app else None
+                is_offscreen = (app.platformName() == "offscreen") if app else False
+                screen = app.primaryScreen() if (app and not is_offscreen) else None
                 avail = screen.availableGeometry() if screen else None
                 min_w = win.minimumWidth() if hasattr(win, "minimumWidth") else 1020
                 min_h = win.minimumHeight() if hasattr(win, "minimumHeight") else 680
                 target_w = max(min_w, int(saved_w))
                 target_h = max(min_h, int(saved_h))
-                if avail:
+                if avail and avail.width() >= min_w and avail.height() >= min_h:
                     target_w = min(target_w, avail.width())
                     target_h = min(target_h, avail.height())
                 win._saved_window_w = target_w
@@ -300,6 +313,8 @@ class SettingsSync:
         win.combo_model.currentIndexChanged.connect(win._queue_save_settings)
         win.combo_device.currentIndexChanged.connect(win._queue_save_settings)
         win.combo_compute.currentIndexChanged.connect(win._queue_save_settings)
+        if hasattr(win, "combo_concurrency"):
+            win.combo_concurrency.currentIndexChanged.connect(win._queue_save_settings)
         win.edit_output_dir.textChanged.connect(win._queue_save_settings)
 
         win.chk_srt.toggled.connect(win._queue_save_settings)

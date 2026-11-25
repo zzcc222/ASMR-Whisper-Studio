@@ -8,7 +8,6 @@ shiboken6>=6.5.0
 
 # --- Media & Audio Processing Engine ---
 av>=11.0.0
-soundfile>=0.12.0
 numpy>=1.24.0,<3.0.0
 
 # --- Inference & Alignment (Platform-Agnostic) ---

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.widgets import MiniWaveformVisualizer
+from ui.components.concurrent_subtitle_view import ConcurrentSubtitleView
 
 
 class TranscribeProgressPanel(QFrame):
@@ -62,14 +63,12 @@ class TranscribeProgressPanel(QFrame):
         self.progress_bar.setValue(0)
         monitor_layout.addWidget(self.progress_bar)
 
-        # 3. 标签切换页：实时字幕预览 vs 详细运行日志
+        # 3. 标签切换页：实时字幕预览 (支持单栏与多路同屏分屏) vs 详细运行日志
         self.tabs_view = QTabWidget()
 
-        self.txt_subtitles = QTextEdit()
-        self.txt_subtitles.setReadOnly(True)
-        self.txt_subtitles.document().setMaximumBlockCount(3000)
-        self.txt_subtitles.setPlaceholderText("转录开始后，实时生成的句子与时间戳将在此处优雅滚动展示……")
-        self.tabs_view.addTab(self.txt_subtitles, "💬 实时字幕预览")
+        self.concurrent_sub_view = ConcurrentSubtitleView(self)
+        self.txt_subtitles = self.concurrent_sub_view.txt_subtitles
+        self.tabs_view.addTab(self.concurrent_sub_view, "💬 实时字幕预览")
 
         # 详细运行日志微型容器与专属 Fluent 工具条
         self.log_container = QWidget()
@@ -478,6 +477,9 @@ class TranscribeProgressPanel(QFrame):
 
     def reset_view(self):
         """重置视窗显示"""
-        self.txt_subtitles.clear()
+        if hasattr(self, "concurrent_sub_view") and self.concurrent_sub_view:
+            self.concurrent_sub_view.reset_all()
+        else:
+            self.txt_subtitles.clear()
         self.progress_bar.setValue(0)
         self.lbl_eta.setText("耗时: 00:00 | 预估剩余: --:--")

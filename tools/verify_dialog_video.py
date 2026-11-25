@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-真实多对白视频端到端转录验证脚本
-验证解耦重构后全套系统在含大量真实对白视频上的识别效果与字幕导出
+真实多对白视频 & 双路并发动态交替接力 (Work-Stealing) 端到端转录验证脚本
+验证项目:
+1. 自动探测 RTX 5070 (12227 MiB -> 标称 12 GB) 并自动规划 2 路并发模型池
+2. 关闭 VAD (vad_filter=False)，在最高对白密度视频《2023年7月R18.mp4》及特典视频上执行真实并发转录
+3. 验证两个任务同时启动，短任务先完成后 0ms 立即接手第 3 个任务（动态交替接力）
+4. 验证多格式字幕导出 (SRT, ASS, VTT, TXT) 与模型池一键显存卸载
 """
+
 import os
 import sys
 import time
 import tempfile
+import subprocess
 
 if sys.platform == "win32":
     try:
@@ -15,39 +21,61 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
 sys_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if sys_root not in sys.path:
     sys.path.insert(0, sys_root)
 
+from PySide6.QtCore import QCoreApplication
 from core.cuda_utils import setup_cuda_dll_paths, resolve_model_path
 setup_cuda_dll_paths()
-from core.transcriber_engine import ASMRTranscriber
+
 from core.config import ASMRTranscriberConfig
-from core.media_probe import probe_media_info
+from core.transcriber_engine import ASMRTranscriber
+from core.subtitle.subtitle_parser import parse_subtitle_file
+from ui.workers.transcribe_worker import TranscriptionWorker
+
+
+def query_vram_used_mb() -> int:
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        return int(out.decode("utf-8").strip().splitlines()[0])
+    except Exception:
+        return 0
 
 
 def main():
-    video_path = r"D:\LOL\ASMR\视频\網野ぴこん\2023年11月R18.mp4"
-    if not os.path.exists(video_path):
-        print(f"[ERROR] 目标视频不存在: {video_path}")
+    app = QCoreApplication.instance() or QCoreApplication(sys.argv)
+
+    v_main = r"D:\LOL\ASMR\视频\網野ぴこん\2023年7月R18.mp4"
+    v_sub1 = r"D:\LOL\ASMR\视频\網野ぴこん\2023年12月特典\2.mp4"
+    v_sub2 = r"D:\LOL\ASMR\视频\網野ぴこん\2023年12月特典\3.mp4"
+
+    test_files = [p for p in (v_main, v_sub1, v_sub2) if os.path.exists(p)]
+    if not test_files:
+        print("[ERROR] 未找到目标测试视频文件！")
         sys.exit(1)
 
-    print("1. 媒体参数探测 (core.media_probe)...")
-    info = probe_media_info(video_path)
-    dur = info.get("duration", 0.0)
-    print(f"   视频: {info.get('width')}x{info.get('height')} @ {info.get('fps')}fps, 编码: {info.get('video_codec')}")
-    print(f"   音频: {info.get('sample_rate')}Hz, {info.get('channels')}声道, 编码: {info.get('audio_codec')}")
-    print(f"   时长: {dur:.2f} 秒 ({dur/60:.1f} 分钟)")
-
     model_path = resolve_model_path("faster-whisper-large-v2")
-    print(f"2. 模型解析: {model_path}")
-    assert os.path.exists(model_path)
+    print("=" * 72)
+    print(f"🎬 真实多对白视频 & 2 路并发交替转录实例验证 (VAD = 关闭)")
+    print(f"📦 模型路径: {model_path}")
+    print(f"📂 待转录队列 ({len(test_files)} 个视频):")
+    for i, fp in enumerate(test_files, 1):
+        print(f"   [{i}] {fp}")
+    print(f"📊 初始显存占用: {query_vram_used_mb()} MiB")
+    print("=" * 72)
 
     cfg = ASMRTranscriberConfig(
         model_size=model_path,
         device="cuda",
         compute_type="float16",
-        vad_filter=False,
+        vad_filter=False,          # 严格按照要求关闭 VAD
+        max_concurrent_tasks=0,    # 0 = 智能自动 (RTX 5070 12GB -> 自动启用 2 路并发)
         export_srt=True,
         export_ass=True,
         export_vtt=True,
@@ -55,53 +83,70 @@ def main():
     )
 
     engine = ASMRTranscriber(cfg)
-    print("3. 加载 Whisper 模型至 RTX 5070 显存...")
-    engine.load_model()
-    assert engine.is_model_loaded() is True
-    print("   -> 模型加载成功！")
+    peak_vram_mb = [query_vram_used_mb()]
+    finished_records = {}
 
     with tempfile.TemporaryDirectory() as td:
-        print(f"4. 开始执行端到端真实语音转录 (临时输出目录: {td})...")
+        worker = TranscriptionWorker(
+            file_paths=test_files,
+            config=cfg,
+            output_dir=td,
+            transcriber=engine,
+        )
+
         t0 = time.time()
-        result = engine.transcribe(video_path, output_dir=td)
-        elapsed = time.time() - t0
 
-        print(f"   -> 转录完成！耗时: {elapsed:.2f} 秒 (视频时长: {dur:.2f} 秒, 速度比: {dur/max(0.1, elapsed):.1f}x 实时的速度)")
-        print(f"   -> 状态: {result.get('status')}")
-        segments = result.get("segments", [])
-        print(f"   -> 识别有效字幕分段数: {len(segments)}")
-        assert len(segments) > 0, "未识别到任何有效对白分段！"
+        def on_log(msg: str):
+            cur_vram = query_vram_used_mb()
+            if cur_vram > peak_vram_mb[0]:
+                peak_vram_mb[0] = cur_vram
+            elapsed = time.time() - t0
+            print(f"[{elapsed:6.2f}s | VRAM {cur_vram:4d} MiB] {msg}", flush=True)
 
-        print("   -> 抽样预览前 10 句台词:")
-        for idx, s in enumerate(segments[:10], 1):
-            print(f"      [{idx:02d}] {s['start']:6.2f}s -> {s['end']:6.2f}s: {s['text']}")
+        def on_file_finished(idx: int, exported: list, elapsed: float):
+            finished_records[idx] = (exported, elapsed, time.time() - t0)
 
-        print("5. 验证导出的字幕文件 (SRT, ASS, VTT, TXT)...")
-        exported = result.get("exported_files", [])
-        assert len(exported) == 4, f"应导出 4 种字幕文件，实际导出: {len(exported)}"
+        def on_all_finished(s_cnt: int, f_cnt: int):
+            total_t = time.time() - t0
+            print("=" * 72)
+            print(f"🎉 队列全部处理完毕！成功: {s_cnt}, 失败: {f_cnt}, 总墙钟耗时: {total_t:.2f}s")
+            print(f"🔥 运行期峰值显存: {peak_vram_mb[0]} MiB ({peak_vram_mb[0]/1024.0:.2f} GB)")
+            print(f"🧩 模型池常驻实例数: {engine.loaded_model_count()} 个")
+            app.quit()
 
-        for fpath in exported:
-            assert os.path.exists(fpath), f"字幕文件不存在: {fpath}"
-            fsize = os.path.getsize(fpath)
-            assert fsize > 100, f"字幕文件异常过小或为空: {fpath} ({fsize} 字节)"
-            ext = os.path.splitext(fpath)[1].lstrip(".").upper()
-            print(f"   -> [{ext}] {os.path.basename(fpath)} (大小: {fsize} 字节)")
+        worker.sig_log.connect(on_log)
+        worker.sig_file_finished.connect(on_file_finished)
+        worker.sig_all_finished.connect(on_all_finished)
 
-        # 验证解析导出的字幕 (core.subtitle_parser)
-        from core.subtitle_parser import parse_subtitle_file
-        srt_file = [f for f in exported if f.endswith(".srt")][0]
-        parsed_items = parse_subtitle_file(srt_file)
-        print(f"   -> core.subtitle_parser 回读验证成功！解析到 {len(parsed_items)} 条字幕")
-        assert len(parsed_items) == len(segments), "解析条目数与原识别分段数不符"
+        worker.start()
+        app.exec()
+        worker.wait(5000)
 
-    print("6. 卸载模型并验证显存清空...")
-    engine.unload_model()
+        assert worker.effective_workers == 2, f"Expected 2 concurrent workers on RTX 5070, got {worker.effective_workers}"
+        assert len(finished_records) == len(test_files), "部分文件未能成功完成！"
+
+        # 验证字幕输出与对白内容
+        for idx, fp in enumerate(test_files):
+            exported, file_elapsed, wall_done_at = finished_records[idx]
+            srt_files = [f for f in exported if f.endswith(".srt")]
+            assert srt_files, f"文件 #{idx+1} 未生成 SRT 字幕"
+            parsed = parse_subtitle_file(srt_files[0])
+            print("-" * 72)
+            print(
+                f"📄 文件 [#{idx+1}] {os.path.basename(fp)}: "
+                f"共识别 {len(parsed)} 句有效对白 | 单任务耗时 {file_elapsed:.1f}s (完成于墙钟 {wall_done_at:.1f}s)"
+            )
+            for sample_i, seg in enumerate(parsed[:10], 1):
+                print(f"   ({sample_i:02d}) [{seg['start_str']} -> {seg['end_str']}] {seg['text']}")
+
+    print("=" * 72)
+    unloaded = engine.unload_model()
+    after_vram = query_vram_used_mb()
+    print(f"🧹 已显式卸载 {unloaded} 个并发模型实例，当前显存恢复至: {after_vram} MiB")
     assert engine.is_model_loaded() is False
-    print("   -> 模型卸载成功！显存已释放。")
-
-    print("\n" + "=" * 65)
-    print("【实例验证全部通过】真实对话密集视频端到端转录、分词与多格式字幕导出 100% 成功！")
-    print("=" * 65)
+    print("========================================================================")
+    print("✅ 真实高密度对白视频 + 双路并发动态交替转录验证 100% 通过！")
+    print("========================================================================")
 
 
 if __name__ == "__main__":

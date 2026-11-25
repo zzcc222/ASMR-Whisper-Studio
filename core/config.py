@@ -10,8 +10,8 @@ import json
 from dataclasses import dataclass
 from typing import List, Optional, Union, Tuple, Dict, Any
 
-from core.text_cleaner import DEFAULT_ASMR_PROMPT
-from core.prompt_parser import DEFAULT_CUSTOM_PRESETS
+from core.nlp.text_cleaner import DEFAULT_ASMR_PROMPT
+from core.nlp.prompt_parser import DEFAULT_CUSTOM_PRESETS
 
 # 音视频媒体扩展名单一事实源 (Single Source of Truth)
 AUDIO_EXTENSIONS = {
@@ -75,6 +75,9 @@ class ASMRTranscriberConfig:
     max_dedup_gap: float = 3.0              # 重复句判定的最大时间间隔(秒)
     filter_r18_moans: bool = True           # 过滤整行无台词的独立娇喘/拟声词
 
+    # 多任务并发控制 (0 = 按显卡显存智能分配, 1~5 = 手动指定并发任务数)
+    max_concurrent_tasks: int = 0
+
 
 class SettingsManager:
     """全局配置持久化管理类 (支持绿色便携与 AppData 安全双路同步)"""
@@ -132,6 +135,7 @@ class SettingsManager:
             "model_data": "",
             "compute_type": "float16",
             "device": "cuda",
+            "concurrent_tasks": 0,
             "output_dir": "",
             "export_srt": True,
             "export_ass": True,

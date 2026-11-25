@@ -40,17 +40,32 @@ from ui.main_window import ASMRTranscriberWindow as MainWindow
 def run_all_checks():
     app = QApplication.instance() or QApplication(sys.argv)
 
+    with tempfile.TemporaryDirectory() as settings_sandbox:
+        sandbox_local = os.path.join(settings_sandbox, "local_settings.json")
+        sandbox_appdata = os.path.join(settings_sandbox, "appdata_settings.json")
+        SettingsManager.set_custom_paths(sandbox_local, sandbox_appdata)
+        try:
+            _run_all_checks_inner(app)
+        finally:
+            SettingsManager.reset_custom_paths()
+
+
+def _run_all_checks_inner(app):
     print("=" * 68)
-    print("🚀 [1/8] 检验 VAD 默认关闭状态 (防止过滤 80% ASMR 轻语)")
+    print("🚀 [1/8] 检验 VAD 默认关闭状态与默认窗口尺寸 (1920x1080 居中，防无头虚拟屏污染)")
     cfg_default = ASMRTranscriberConfig()
     assert cfg_default.vad_filter is False, f"Expected ASMRTranscriberConfig.vad_filter=False, got {cfg_default.vad_filter}"
     default_settings = SettingsManager.get_default_settings()
     assert default_settings["vad_enabled"] is False, f"Expected default_settings['vad_enabled']=False, got {default_settings['vad_enabled']}"
+    assert default_settings["window_width"] == 1920 and default_settings["window_height"] == 1080
     win = MainWindow()
     assert win.switch_vad.isChecked() is False, f"Expected win.switch_vad.isChecked()=False, got {win.switch_vad.isChecked()}"
+    assert win._saved_window_w == 1920 and win._saved_window_h == 1080, (
+        f"Expected 1920x1080 saved window size, got {win._saved_window_w}x{win._saved_window_h}"
+    )
     print("  ✅ ASMRTranscriberConfig.vad_filter == False")
     print("  ✅ SettingsManager.get_default_settings()['vad_enabled'] == False")
-    print("  ✅ MainWindow.switch_vad.isChecked() == False")
+    print("  ✅ MainWindow 默认窗口尺寸 1920x1080 保持完整 (不受 offscreen 800x800 虚拟屏篡改)")
 
     print("=" * 68)
     print("🚀 [2/8] 检验主题色板 Token 与 ASS 颜色转换")
@@ -149,7 +164,23 @@ def run_all_checks():
         assert saved_ok is True
         re_parsed = parse_subtitle_file(srt_path)
         assert re_parsed[0]["text"] == "こんばんは、ご主人様"
-    print("  ✅ 重叠字幕并排显示、实时搜索过滤与原位保存校验通过")
+
+        # 测试 ASS 卡拉 OK (\k) 标签在仅微调时间轴、未修改台词文本时 100% 保留
+        ass_path = os.path.join(tmpdir, "karaoke.ass")
+        with open(ass_path, "w", encoding="utf-8-sig") as f:
+            f.write(
+                "[Script Info]\nScriptType: v4.00+\n\n"
+                "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+                "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\k50}お{\\k60}やすみ\n"
+            )
+        ass_items = parse_subtitle_file(ass_path)
+        assert len(ass_items) == 1 and "\\k50" in ass_items[0].get("raw_ass_text", "")
+        ass_items[0]["start_ms"] = 1200  # 仅微调起始时间，不改动台词文本
+        save_subtitle_items(ass_path, ass_items)
+        with open(ass_path, "r", encoding="utf-8-sig") as f:
+            saved_ass_content = f.read()
+        assert "{\\k50}お{\\k60}やすみ" in saved_ass_content, f"Karaoke tags lost: {saved_ass_content}"
+    print("  ✅ 重叠字幕并排显示、实时搜索过滤、原位保存与 ASS 卡拉OK标签无损保留校验通过")
 
     print("=" * 68)
     print("🚀 [7/8] 检验 FFmpeg force_style 构建与真实视频硬字幕压制")
@@ -224,13 +255,95 @@ def run_all_checks():
     ev_right = QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Right, Qt.NoModifier)
     burner.keyPressEvent(ev_right)
     burner.player_panel.shutdown()
+    print("  ✅ 批量压制队列与快捷键事件校验通过")
+
+    print("=" * 68)
+    print("🚀 [9/9] 检验显卡显存档位并发规划 (8G/12G/16G动态/24G/32G) 与分文件字幕预览隔离缓存")
+    from core.concurrency_planner import (
+        GpuVramSnapshot,
+        normalize_nominal_vram_gb,
+        calculate_tier_concurrency,
+        plan_effective_concurrency,
+    )
+    assert normalize_nominal_vram_gb(8188) == 8
+    assert normalize_nominal_vram_gb(12227) == 12
+    assert normalize_nominal_vram_gb(16376) == 16
+    assert normalize_nominal_vram_gb(24564) == 24
+    assert normalize_nominal_vram_gb(32760) == 32
+
+    assert calculate_tier_concurrency(8, free_gb=6.8) == 1
+    assert calculate_tier_concurrency(12, free_gb=10.2) == 2
+    assert calculate_tier_concurrency(16, free_gb=13.5) == 3  # 16G 剩余显存够 -> 跑 3 个任务
+    assert calculate_tier_concurrency(16, free_gb=10.5) == 2  # 16G 剩余显存紧张 -> 跑 2 个任务
+    assert calculate_tier_concurrency(24, free_gb=21.0) == 4
+    assert calculate_tier_concurrency(32, free_gb=28.0) == 5
+    assert calculate_tier_concurrency(48, free_gb=44.0) == 8
+    assert calculate_tier_concurrency(60, free_gb=56.0) == 10
+    assert calculate_tier_concurrency(80, free_gb=74.0) == 13
+    assert calculate_tier_concurrency(96, free_gb=90.0) == 16
+
+    # 检验下拉框通用文案（不含具体显卡型号）、1~16 路完整选项与滚动行数配置
+    auto_item_text = win.combo_concurrency.itemText(0)
+    assert "RTX" not in auto_item_text and "5070" not in auto_item_text, f"Auto label should be generic: {auto_item_text}"
+    assert win.combo_concurrency.count() == 17, f"Expected 17 concurrency items (0..16), got {win.combo_concurrency.count()}"
+    assert win.combo_concurrency.maxVisibleItems() == 6
+
+    snap_5070 = GpuVramSnapshot(
+        gpu_name="RTX 5070", raw_name="NVIDIA GeForce RTX 5070",
+        total_mb=12227, free_mb=10476, used_mb=1468,
+        nominal_gb=12, free_gb=10.23, is_cuda_available=True,
+    )
+    plan_single = plan_effective_concurrency("cuda", 0, total_files=1, snapshot=snap_5070)
+    assert plan_single["effective_workers"] == 1  # 单文件按需分配 1 路
+    plan_multi = plan_effective_concurrency("cuda", 0, total_files=5, snapshot=snap_5070)
+    assert plan_multi["effective_workers"] == 2  # 多文件在 5070 12G 上分配 2 路
+    plan_cpu = plan_effective_concurrency("cpu", 0, total_files=5, snapshot=snap_5070)
+    assert plan_cpu["effective_workers"] == 1
+
+    # 校验单大窗 + 顶部任务选择栏 (combo_preview_task) + 自动切换开关 (btn_auto_follow) 逻辑
+    buf = win.runner.preview_buffer
+    cview = win.progress_panel.concurrent_sub_view
+    buf.prepare_batch(["D:/Videos/file_A.mp4", "D:/Videos/file_B.mp4", "D:/Videos/file_C.mp4"])
+    assert cview.combo_preview_task.count() == 3
+    assert cview.btn_auto_follow.isChecked() is True
+
+    # 1. 启动任务 A 与任务 B (并发)，默认聚焦任务 A，任务 B 静默入库且下拉框显示实时状态
+    buf.on_file_started(0, 3, "file_A.mp4")
+    buf.on_file_started(1, 3, "file_B.mp4")
+    buf.on_segment(0, 1.0, 3.0, "ファイルAの台詞")
+    buf.on_segment(1, 2.0, 4.0, "ファイルBの台詞")
+    assert "ファイルAの台詞" in win.txt_subtitles.toPlainText()
+    assert "ファイルBの台詞" not in win.txt_subtitles.toPlainText()
+    assert "正在转录" in cview.combo_preview_task.itemText(0) and "file_A.mp4" in cview.combo_preview_task.itemText(0)
+    assert "正在转录" in cview.combo_preview_task.itemText(1) and "file_B.mp4" in cview.combo_preview_task.itemText(1)
+
+    # 2. 用户手动选择观看任务 B 后：自动切换变为关闭 (📌 已固定当前)，后续任务 B 完成或新任务 C 开始均不自动跳转！
+    buf.switch_focus(1, pinned_by_user=True)
+    assert cview.btn_auto_follow.isChecked() is False
+    assert "已固定" in cview.btn_auto_follow.text()
+    assert "ファイルBの台詞" in win.txt_subtitles.toPlainText()
+
+    buf.on_file_finished(1, "<div>B done</div>")
+    buf.on_file_started(2, 3, "file_C.mp4")
+    buf.on_segment(2, 0.5, 2.0, "ファイルCの接力台詞")
+    # 验证因用户手动固定了任务 B，即使任务 B 完成且新任务 C 开始，窗口依然停留在任务 B 绝不乱跳！
+    assert buf.focused_idx == 1
+    assert "ファイルBの台詞" in win.txt_subtitles.toPlainText()
+    assert "ファイルCの接力台詞" not in win.txt_subtitles.toPlainText()
+
+    # 3. 当用户重新开启「🔄 自动切换」时，因为任务 B 已结束，立即自动跳转到正在转录的任务 A / C
+    buf.set_auto_follow(True)
+    assert cview.btn_auto_follow.isChecked() is True
+    assert buf.focused_idx in (0, 2)
+    buf.clear()
+    print("  ✅ 通用文案、1~16路(96GB+)滚动下拉框、单大窗任务选择栏与手动固定防跳转校验 100% 通过")
+
     if hasattr(win, "gpu_detector") and win.gpu_detector and win.gpu_detector.isRunning():
         win.gpu_detector.wait(2000)
     if hasattr(win, "tray_manager") and win.tray_manager:
         win.tray_manager.cleanup()
-    print("  ✅ 批量压制队列与快捷键事件校验通过")
     print("=" * 68)
-    print("🎉 所有 8 项前端深度优化测试 100% 通过！")
+    print("🎉 所有 9 项前端与并发规划深度测试 100% 通过！")
     sys.stdout.flush()
 
 

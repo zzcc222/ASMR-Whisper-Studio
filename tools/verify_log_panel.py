@@ -28,7 +28,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from PySide6.QtWidgets import QApplication, QPushButton
 app = QApplication.instance() or QApplication(["--platform", "offscreen"])
 
-from core.prompt_parser import summarize_prompt, DEFAULT_CUSTOM_PRESETS
+from core.nlp.prompt_parser import summarize_prompt, DEFAULT_CUSTOM_PRESETS
 from ui.views.transcribe_progress_panel import TranscribeProgressPanel
 
 

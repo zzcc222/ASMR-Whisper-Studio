@@ -317,20 +317,25 @@ class TrayMenuManager(QObject):
             return
 
         # 执行卸载
-        self.win.transcriber.unload_model()
+        unloaded_cnt = self.win.transcriber.unload_model() or 1
         if hasattr(self.win, "_detect_gpu_env"):
             self.win._detect_gpu_env()
+        log_msg = (
+            f"🧹 [托盘快捷指令] 已从 GPU 显存中卸载 {unloaded_cnt} 个并发 Whisper 模型实例，显存已恢复空闲。"
+            if unloaded_cnt > 1
+            else "🧹 [托盘快捷指令] Whisper 模型已从 GPU 显存中卸载，显存已恢复空闲。"
+        )
         if hasattr(self.win, "progress_panel") and hasattr(self.win.progress_panel, "append_log"):
-            self.win.progress_panel.append_log("🧹 [托盘快捷指令] Whisper 模型已从 GPU 显存中卸载，显存已恢复空闲。")
+            self.win.progress_panel.append_log(log_msg)
         elif hasattr(self.win, "txt_logs"):
-            self.win.txt_logs.append("🧹 [托盘快捷指令] Whisper 模型已从 GPU 显存中卸载，显存已恢复空闲。")
+            self.win.txt_logs.append(log_msg)
 
         self.update_status("待命就绪", "idle")
 
         if self.win.isVisible():
-            QMessageBox.information(self.win, "显存已释放", "🎉 Whisper 模型已成功从 GPU 显存中卸载！\n显存已释放完毕。")
+            QMessageBox.information(self.win, "显存已释放", f"🎉 {log_msg.replace('🧹 [托盘快捷指令] ', '')}")
         else:
-            self.show_notification("显存已释放", "🎉 Whisper 模型已成功从 GPU 显存卸载，显存已恢复空闲状态。", QSystemTrayIcon.Information)
+            self.show_notification("显存已释放", f"🎉 {log_msg.replace('🧹 [托盘快捷指令] ', '')}", QSystemTrayIcon.Information)
 
     def _on_toggle_minimize_to_tray(self, checked: bool):
         """切换关闭时最小化到托盘开关"""

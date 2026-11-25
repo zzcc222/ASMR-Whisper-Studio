@@ -35,29 +35,6 @@ QFrame#apple_card {
     border-radius: 14px;
 }
 
-/* 兼容拟态卡片分组框 (彻底消除 margin 剪裁导致的黑底断痕) */
-QGroupBox {
-    background-color: #FFFFFF;
-    border: 1px solid #E4E4E7;
-    border-radius: 14px;
-    margin-top: 6px;
-    padding-top: 14px;
-    padding-bottom: 12px;
-    padding-left: 12px;
-    padding-right: 12px;
-    font-weight: bold;
-    color: #18181B;
-}
-
-QGroupBox::title {
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    padding: 0 8px;
-    color: #3F3F46;
-    font-size: 13px;
-    font-weight: 700;
-}
-
 /* 通用按钮 */
 QPushButton {
     background-color: #FFFFFF;

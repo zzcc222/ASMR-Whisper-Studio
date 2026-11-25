@@ -11,23 +11,25 @@ ASMR Whisper Studio - ASMR 专用转录核心服务引擎
 import gc
 import logging
 import os
+import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.config import ASMRTranscriberConfig
 from core.cuda_utils import resolve_model_path
-from core.media_probe import probe_media_info
-from core.prompt_parser import summarize_prompt
-from core.r18_cleaner import (
+from core.media.media_probe import probe_media_info
+from core.model_pool import WhisperModelPool
+from core.nlp.prompt_parser import summarize_prompt
+from core.nlp.r18_cleaner import (
     clean_r18_segments,
     is_pure_moan_or_sound,
     normalize_text_core,
 )
-from core.subtitle_exporter import (
+from core.subtitle.subtitle_exporter import (
     export_subtitles as core_export_subtitles,
     format_timestamp,
 )
-from core.text_cleaner import (
+from core.nlp.text_cleaner import (
     clean_sub_text,
     is_noise_or_empty_token,
     is_pure_punctuation_or_noise,
@@ -40,35 +42,67 @@ logger = logging.getLogger("ASMRTranscriber")
 class ASMRTranscriber:
     """
     ASMR 专用转录核心服务类
-    封装 faster-whisper (CTranslate2)，提供精准的进度估算与段落回调
+    封装 faster-whisper (CTranslate2)，支持同进程多独立模型实例池并发推理与显存一键释放
     """
 
     def __init__(self, config: Optional[ASMRTranscriberConfig] = None):
         self.config = config or ASMRTranscriberConfig()
-        self._model = None
-        self._current_model_key = None
-        self._is_cancelled = False
+        self._pool = WhisperModelPool()
+        self._cancel_event = threading.Event()
+
+    @property
+    def _model(self) -> Optional[Any]:
+        return self._pool.primary_model
+
+    @_model.setter
+    def _model(self, val: Optional[Any]):
+        self._pool.set_external_primary_model(val, self._pool.current_model_key)
+
+    @property
+    def _current_model_key(self) -> Optional[Tuple[str, str, int, str]]:
+        return self._pool.current_model_key
+
+    @_current_model_key.setter
+    def _current_model_key(self, val: Optional[Tuple[str, str, int, str]]):
+        self._pool._current_model_key = val
+
+    @property
+    def _is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
+
+    @_is_cancelled.setter
+    def _is_cancelled(self, val: bool):
+        if val:
+            self._cancel_event.set()
+        else:
+            self._cancel_event.clear()
 
     def cancel(self):
-        """发送取消转录指令"""
-        self._is_cancelled = True
+        """发送取消转录指令 (线程安全，即时广播至所有并发工作槽位)"""
+        self._cancel_event.set()
         logger.info("转录取消指令已触发。")
 
     def reset_cancel(self):
-        self._is_cancelled = False
+        self._cancel_event.clear()
 
     def is_model_loaded(self) -> bool:
-        """检查当前模型是否已经在内存/显存中就绪"""
-        return self._model is not None
+        """检查当前是否有模型已经在内存/显存中就绪"""
+        return self._pool.is_loaded()
 
-    def unload_model(self):
-        """显式卸载模型并彻底释放 GPU 显存"""
-        if self._model is not None:
-            del self._model
-            self._model = None
-            self._current_model_key = None
-            gc.collect()
-            logger.info("Whisper 模型已成功卸载，GPU 显存已释放。")
+    def loaded_model_count(self) -> int:
+        """获取当前池中已常驻显存的模型实例数量"""
+        return self._pool.loaded_count()
+
+    def unload_model(self) -> int:
+        """显式卸载池中所有模型实例并彻底释放 GPU 显存"""
+        unloaded_cnt = self._pool.unload_all()
+        if unloaded_cnt > 0:
+            logger.info(f"Whisper 模型池 ({unloaded_cnt} 个实例) 已成功卸载，GPU 显存已释放。")
+        return unloaded_cnt
+
+    def shrink_pool_instance(self, model_instance: Any) -> int:
+        """运行期发生单槽位 OOM 时动态卸载指定冗余实例"""
+        return self._pool.remove_instance(model_instance)
 
     @staticmethod
     def _install_hotwords_prompt_guard(model: Any) -> None:
@@ -127,65 +161,25 @@ class ASMRTranscriber:
         model.get_prompt = _guarded_get_prompt
         model._asmr_prompt_guard_installed = True
 
-    def load_model(self, force_reload: bool = False):
-        """延迟加载或重新加载模型 (跨任务自动复用，具备 CUDA/CPU 精度梯队自动降级保护)"""
-        if self.config.device == "cpu" and self.config.compute_type in ("float16", "int8_float16", "bfloat16"):
-            logger.warning(f"检测到 CPU 设备选用了不支持的计算精度 [{self.config.compute_type}]，自动安全降级为 [int8]")
-            self.config.compute_type = "int8"
-
-        actual_model_path = resolve_model_path(self.config.model_size)
-        model_key = (actual_model_path, self.config.device, self.config.device_index, self.config.compute_type)
-
-        if self._model is not None and self._current_model_key == model_key and not force_reload:
-            self._install_hotwords_prompt_guard(self._model)
-            return self._model
-
-        if self._model is not None:
-            self.unload_model()
-
-        # 构建有序计算精度回退候选链
-        compute_candidates = [self.config.compute_type]
-        fallback_chain = (
-            ["float16", "int8_float16", "int8", "float32"]
-            if self.config.device == "cuda"
-            else ["int8", "float32"]
+    def prepare_model_pool(
+        self,
+        worker_count: int = 1,
+        force_reload: bool = False,
+        log_callback: Optional[Callable[[str], None]] = None,
+    ) -> List[Any]:
+        """准备指定并发数量的独立 WhisperModel 实例池 (支持按需懒加载扩容与精度回退保护)"""
+        return self._pool.ensure_pool(
+            config=self.config,
+            target_count=worker_count,
+            force_reload=force_reload,
+            prompt_guard_installer=self._install_hotwords_prompt_guard,
+            log_callback=log_callback,
         )
-        for fb in fallback_chain:
-            if fb not in compute_candidates:
-                compute_candidates.append(fb)
 
-        last_err = None
-        for cur_compute in compute_candidates:
-            logger.info(
-                f"正在加载 Whisper 模型 [{self.config.model_size}] (实际路径: {actual_model_path}), "
-                f"设备: {self.config.device}, 精度: {cur_compute}..."
-            )
-
-            try:
-                from faster_whisper import WhisperModel
-                self._model = WhisperModel(
-                    actual_model_path,
-                    device=self.config.device,
-                    device_index=self.config.device_index,
-                    compute_type=cur_compute,
-                    download_root=self.config.download_root,
-                )
-                self._install_hotwords_prompt_guard(self._model)
-                self.config.compute_type = cur_compute
-                self._current_model_key = (
-                    actual_model_path,
-                    self.config.device,
-                    self.config.device_index,
-                    cur_compute,
-                )
-                logger.info("成功加载原生 faster-whisper 模型！")
-                return self._model
-            except Exception as e:
-                last_err = e
-                logger.warning(f"以精度 [{cur_compute}] 加载模型失败: {e}")
-
-        logger.error(f"加载 Whisper 模型严重错误: {last_err}")
-        raise last_err
+    def load_model(self, force_reload: bool = False):
+        """延迟加载或重新加载主模型 (跨任务自动复用，具备 CUDA/CPU 精度梯队自动降级保护)"""
+        models = self.prepare_model_pool(worker_count=1, force_reload=force_reload)
+        return models[0]
 
     def get_audio_duration(self, audio_path: str) -> float:
         """获取音视频总时长（秒），委托至 core.media_probe.probe_media_info"""
@@ -203,9 +197,12 @@ class ASMRTranscriber:
         progress_callback: Optional[Callable[[float, str], None]] = None,
         segment_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
+        model_instance: Optional[Any] = None,
+        reset_cancel_on_start: bool = True,
     ) -> Dict[str, Any]:
-        """执行单个音视频文件的 ASMR 专用转录"""
-        self.reset_cancel()
+        """执行单个音视频文件的 ASMR 专用转录 (支持传入并发模型槽位实例 model_instance)"""
+        if reset_cancel_on_start:
+            self.reset_cancel()
         start_time = time.time()
 
         def log(msg: str):
@@ -229,7 +226,7 @@ class ASMRTranscriber:
 
         if progress_callback:
             progress_callback(5.0, "正在准备 Whisper 模型...")
-        model = self.load_model()
+        model = model_instance if model_instance is not None else self.load_model()
 
         if self._is_cancelled:
             return {"status": "cancelled", "segments": []}

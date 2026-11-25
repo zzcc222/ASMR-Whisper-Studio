@@ -12,18 +12,20 @@ if sys.platform == "win32":
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QIcon, QPixmap, QCloseEvent, QDesktopServices
+from PySide6.QtGui import QIcon, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QSplitter, QMessageBox, QSystemTrayIcon,
+    QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
+    QSplitter, QMessageBox, QSystemTrayIcon,
     QApplication, QScrollArea
 )
 from PySide6.QtNetwork import QLocalServer
 
 from core.transcriber_engine import ASMRTranscriber
 from core.config import SUPPORTED_MEDIA_EXTENSIONS as SUPPORTED_EXTENSIONS, PROMPT_EXTENSIONS
+from core.subtitle.sub_matcher import find_matching_subtitle
 from ui.widgets import SlidingStackedWidget
 from ui.styles import setup_dwm_light_titlebar
+from ui.views.app_header_footer import AppHeaderBar, AppFooterBar
 from ui.views.transcribe_queue_panel import TranscribeQueuePanel
 from ui.views.transcribe_config_panel import TranscribeConfigPanel
 from ui.views.transcribe_progress_panel import TranscribeProgressPanel
@@ -99,6 +101,7 @@ class ASMRTranscriberWindow(QMainWindow):
         self.btn_open_model_dir = self.config_panel.btn_open_model_dir
         self.combo_device = self.config_panel.combo_device
         self.combo_compute = self.config_panel.combo_compute
+        self.combo_concurrency = self.config_panel.combo_concurrency
         self.edit_output_dir = self.config_panel.edit_output_dir
         self.btn_browse_output = self.config_panel.btn_browse_output
         self.chk_srt = self.config_panel.chk_srt
@@ -184,84 +187,16 @@ class ASMRTranscriberWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 1. 顶部 Header Bar
-        self.header_bar = QFrame()
-        self.header_bar.setObjectName("app_header_bar")
-        self.header_bar.setFixedHeight(54)
-        header_layout = QHBoxLayout(self.header_bar)
-        header_layout.setContentsMargins(18, 0, 18, 0)
-        header_layout.setSpacing(14)
-
-        brand_layout = QHBoxLayout()
-        brand_layout.setSpacing(8)
-        mac_dots = QHBoxLayout()
-        mac_dots.setSpacing(6)
-        for c_fill, c_border in [("#FF5F56", "#E0443E"), ("#FFBD2E", "#DEA123"), ("#27C93F", "#1AAB29")]:
-            dot = QLabel()
-            dot.setFixedSize(11, 11)
-            dot.setStyleSheet(f"background-color: {c_fill}; border: 1px solid {c_border}; border-radius: 5px;")
-            mac_dots.addWidget(dot)
-        brand_layout.addLayout(mac_dots)
-
-        lbl_logo = QLabel()
-        lbl_logo.setFixedSize(28, 28)
-        lbl_logo.setAlignment(Qt.AlignCenter)
-        logo_path = os.path.join(_app_root_dir, "assets", "app.png")
-        if os.path.exists(logo_path):
-            lbl_logo.setPixmap(QPixmap(logo_path).scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            lbl_logo.setText("🎙️")
-
-        self.lbl_app_title = QLabel("ASMR Whisper v3.3")
-        self.lbl_app_title.setStyleSheet("font-size: 14px; font-weight: 800; color: #18181B; letter-spacing: -0.2px;")
-        brand_layout.addWidget(lbl_logo, alignment=Qt.AlignVCenter)
-        brand_layout.addWidget(self.lbl_app_title, alignment=Qt.AlignVCenter)
-        header_layout.addLayout(brand_layout)
-        header_layout.addStretch(1)
-
-        seg_container = QFrame()
-        seg_container.setFixedHeight(38)
-        seg_container.setMinimumWidth(380)
-        seg_container.setStyleSheet("background-color: #F4F4F5; border: 1px solid #E4E4E7; border-radius: 12px; padding: 2px;")
-        seg_layout = QHBoxLayout(seg_container)
-        seg_layout.setContentsMargins(3, 3, 3, 3)
-        seg_layout.setSpacing(4)
-
-        self.btn_seg_transcribe = QPushButton("🎙️ ASMR 语音转录")
-        self.btn_seg_transcribe.setObjectName("seg_tab_active")
-        self.btn_seg_transcribe.setMinimumWidth(165)
-        self.btn_seg_transcribe.setFixedHeight(30)
-        self.btn_seg_transcribe.setCursor(Qt.PointingHandCursor)
+        # 1. 顶部 Header Bar (解耦为 AppHeaderBar)
+        self.header_bar = AppHeaderBar(central_widget)
+        self.lbl_app_title = self.header_bar.lbl_app_title
+        self.btn_seg_transcribe = self.header_bar.btn_seg_transcribe
+        self.btn_seg_burner = self.header_bar.btn_seg_burner
+        self.lbl_gpu_status = self.header_bar.lbl_gpu_status
+        self.btn_unload_model = self.header_bar.btn_unload_model
         self.btn_seg_transcribe.clicked.connect(lambda: self._switch_main_tab(0))
-
-        self.btn_seg_burner = QPushButton("🎬 字幕压制与声学视窗")
-        self.btn_seg_burner.setObjectName("seg_tab_inactive")
-        self.btn_seg_burner.setMinimumWidth(185)
-        self.btn_seg_burner.setFixedHeight(30)
-        self.btn_seg_burner.setCursor(Qt.PointingHandCursor)
         self.btn_seg_burner.clicked.connect(lambda: self._switch_main_tab(1))
-
-        seg_layout.addWidget(self.btn_seg_transcribe)
-        seg_layout.addWidget(self.btn_seg_burner)
-        header_layout.addWidget(seg_container)
-        header_layout.addStretch(1)
-
-        right_header_layout = QHBoxLayout()
-        right_header_layout.setSpacing(8)
-
-        self.lbl_gpu_status = QLabel("正在检测设备...")
-        self.btn_unload_model = QPushButton("🧹 释放显存")
-        self.btn_unload_model.setToolTip("将已载入显存的 Whisper 模型从 GPU 中卸载，释放 3~4GB 显存")
-        self.btn_unload_model.setCursor(Qt.PointingHandCursor)
-        self.btn_unload_model.setStyleSheet("""
-            QPushButton { background-color: #FFFFFF; border: 1px solid #E4E4E7; border-radius: 12px; padding: 4px 12px; font-size: 11px; font-weight: 600; color: #3F3F46; }
-            QPushButton:hover { background-color: #F5F3FF; border-color: #DDD6FE; color: #6D28D9; }
-        """)
         self.btn_unload_model.clicked.connect(self._on_unload_model)
-
-        right_header_layout.addWidget(self.lbl_gpu_status, alignment=Qt.AlignVCenter)
-        right_header_layout.addWidget(self.btn_unload_model, alignment=Qt.AlignVCenter)
-        header_layout.addLayout(right_header_layout)
         main_layout.addWidget(self.header_bar, 0)
 
         # 2. 顶层双标签页主导航容器
@@ -288,21 +223,9 @@ class ASMRTranscriberWindow(QMainWindow):
         # 标签页 2：🎬 字幕内嵌与音轨预览
         self.main_tabs.addTab(self.sub_burner_tab, "🎬 字幕内嵌与音轨预览")
 
-        # 3. 底部状态栏
-        self.footer_bar = QFrame()
-        self.footer_bar.setObjectName("app_footer_bar")
-        self.footer_bar.setFixedHeight(34)
-        footer_layout = QHBoxLayout(self.footer_bar)
-        footer_layout.setContentsMargins(18, 0, 18, 0)
-
-        self.lbl_footer_left = QLabel(self.footer_bar)
-        self.lbl_footer_left.setStyleSheet("color: #71717A; font-size: 11px;")
-        lbl_footer_right = QLabel("ASMR Whisper Studio v3.3")
-        lbl_footer_right.setStyleSheet("color: #A1A1AA; font-size: 11px;")
-
-        footer_layout.addWidget(self.lbl_footer_left)
-        footer_layout.addStretch()
-        footer_layout.addWidget(lbl_footer_right)
+        # 3. 底部状态栏 (解耦为 AppFooterBar)
+        self.footer_bar = AppFooterBar(central_widget)
+        self.lbl_footer_left = self.footer_bar.lbl_footer_left
         main_layout.addWidget(self.footer_bar, 0)
 
         # 左右分栏组装
@@ -344,7 +267,6 @@ class ASMRTranscriberWindow(QMainWindow):
         right_layout.addWidget(self.progress_panel, 1)
 
         self.right_scroll.setWidget(self.right_widget)
-        right_widget = self.right_widget
         self.right_config_scroll = self.right_scroll
 
         self.splitter.addWidget(left_widget)
@@ -377,14 +299,20 @@ class ASMRTranscriberWindow(QMainWindow):
 
     def _detect_gpu_env(self):
         dev = self.combo_device.currentText() if hasattr(self, "combo_device") else "cuda"
-        is_loaded = self.transcriber.is_model_loaded() if hasattr(self, "transcriber") else False
-        desc, qss = detect_gpu_environment(dev, is_loaded)
+        loaded_cnt = (
+            self.transcriber.loaded_model_count()
+            if hasattr(self, "transcriber") and hasattr(self.transcriber, "loaded_model_count")
+            else (1 if hasattr(self, "transcriber") and self.transcriber.is_model_loaded() else 0)
+        )
+        desc, qss = detect_gpu_environment(dev, loaded_cnt)
         self.lbl_gpu_status.setText(desc)
         self.lbl_gpu_status.setStyleSheet(qss)
         self._refresh_footer_status()
         is_running = hasattr(self, "worker") and self.worker and self.worker.isRunning()
         if not is_running:
-            if is_loaded:
+            if loaded_cnt > 1:
+                self.update_tray_status(f"模型常驻 ({loaded_cnt}路)", "loaded")
+            elif loaded_cnt == 1:
                 self.update_tray_status("模型常驻", "loaded")
             else:
                 self.update_tray_status("待命就绪", "idle")
@@ -394,8 +322,12 @@ class ASMRTranscriberWindow(QMainWindow):
         if not hasattr(self, "lbl_footer_left") or not self.lbl_footer_left:
             return
         dev = self.combo_device.currentText() if hasattr(self, "combo_device") else "cuda"
-        is_loaded = self.transcriber.is_model_loaded() if hasattr(self, "transcriber") else False
-        desc, _ = detect_gpu_environment(dev, is_loaded)
+        loaded_cnt = (
+            self.transcriber.loaded_model_count()
+            if hasattr(self, "transcriber") and hasattr(self.transcriber, "loaded_model_count")
+            else (1 if hasattr(self, "transcriber") and self.transcriber.is_model_loaded() else 0)
+        )
+        desc, _ = detect_gpu_environment(dev, loaded_cnt)
         clean_gpu = desc.replace("🟢 ", "").replace("💻 ", "").replace("⚠️ ", "").strip()
         self.lbl_footer_left.setText(f"🟢 系统就绪  •  CTranslate2 ({clean_gpu})  •  Whisper 原生字幕时间轴")
 
@@ -406,13 +338,18 @@ class ASMRTranscriberWindow(QMainWindow):
         if not self.transcriber.is_model_loaded():
             QMessageBox.information(self, "提示", "当前没有正在占用显存的模型。")
             return
-        self.transcriber.unload_model()
+        unloaded_cnt = self.transcriber.unload_model() or 1
         self._detect_gpu_env()
+        log_msg = (
+            f"🧹 已从 GPU 显存中卸载 {unloaded_cnt} 个并发 Whisper 模型实例，显存已恢复空闲状态。"
+            if unloaded_cnt > 1
+            else "🧹 Whisper 模型已从 GPU 显存中卸载，显存已恢复空闲状态。"
+        )
         if hasattr(self, "progress_panel") and hasattr(self.progress_panel, "append_log"):
-            self.progress_panel.append_log("🧹 Whisper 模型已从 GPU 显存中卸载，显存已恢复空闲状态。")
+            self.progress_panel.append_log(log_msg)
         else:
-            self.txt_logs.append("🧹 Whisper 模型已从 GPU 显存中卸载，显存已恢复空闲状态。")
-        QMessageBox.information(self, "显存已释放", "🎉 Whisper 模型已成功从 GPU 显存中卸载！\n显存已释放完毕。")
+            self.txt_logs.append(log_msg)
+        QMessageBox.information(self, "显存已释放", f"🎉 {log_msg.lstrip('🧹 ').strip()}")
 
     def _on_device_selection_changed(self, device_text: Optional[str] = None):
         self.config_panel._on_device_selection_changed(device_text)
@@ -441,6 +378,8 @@ class ASMRTranscriberWindow(QMainWindow):
     def _center_on_screen(self):
         if self.isMaximized():
             return
+        if QApplication.platformName() == "offscreen":
+            return
         screen = QApplication.primaryScreen()
         if screen:
             screen_geom = screen.availableGeometry()
@@ -448,18 +387,13 @@ class ASMRTranscriberWindow(QMainWindow):
             avail_h = screen_geom.height()
             avail_x = screen_geom.x()
             avail_y = screen_geom.y()
+            if avail_w < self.minimumWidth() or avail_h < self.minimumHeight():
+                return
 
             target_w = getattr(self, "_saved_window_w", 1920) or 1920
             target_h = getattr(self, "_saved_window_h", 1080) or 1080
-            target_w = max(self.minimumWidth(), target_w)
-            target_h = max(self.minimumHeight(), target_h)
-
-            w = min(target_w, avail_w)
-            h = min(target_h, avail_h)
-            w = max(self.minimumWidth(), w)
-            h = max(self.minimumHeight(), h)
-            w = min(w, avail_w)
-            h = min(h, avail_h)
+            w = max(self.minimumWidth(), min(target_w, avail_w))
+            h = max(self.minimumHeight(), min(target_h, avail_h))
             self.resize(w, h)
 
             center_x = (avail_w - w) // 2 + avail_x
@@ -468,7 +402,7 @@ class ASMRTranscriberWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if not self.isMaximized():
+        if not self.isMaximized() and self.isVisible() and QApplication.platformName() != "offscreen":
             self._saved_window_w = self.width()
             self._saved_window_h = self.height()
         self._queue_save_settings()
@@ -679,7 +613,11 @@ class ASMRTranscriberWindow(QMainWindow):
             return
 
         target_sub = ""
-        if self.last_completed_info and self.last_completed_info.get("video") == target_video:
+        if selected_rows and hasattr(self, "runner") and hasattr(self.runner, "completed_files_map"):
+            mapped = self.runner.completed_files_map.get(selected_rows[0])
+            if mapped and mapped.get("video") == target_video:
+                target_sub = mapped.get("sub", "")
+        if not target_sub and self.last_completed_info and self.last_completed_info.get("video") == target_video:
             target_sub = self.last_completed_info.get("sub", "")
 
         if not target_sub:

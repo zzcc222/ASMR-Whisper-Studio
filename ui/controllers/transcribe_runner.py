@@ -1,27 +1,30 @@
 # -*- coding: utf-8 -*-
 """
 ASMR Whisper Studio - 转录任务执行调度控制器 (TranscribeRunner)
-负责后台 TranscriptionWorker 线程调度、实时字幕/进度推流、精修结果同步、状态更新与UI锁管理
+负责后台 TranscriptionWorker 线程调度、多路并发加权进度聚合、分文件字幕流缓存切换与 UI 锁管理
 """
 
 import os
 import time
 import html
-from typing import Optional
+from typing import Dict, Optional, Set
 
 from PySide6.QtCore import Qt, QObject, Slot
 from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import QMessageBox, QTableWidgetItem, QSystemTrayIcon
 
 from core.config import ASMRTranscriberConfig
-from core.subtitle.subtitle_exporter import format_timestamp
 from ui.workers.transcribe_worker import TranscriptionWorker
 from ui.components.file_card import FileCardRowWidget
 from ui.widgets import ConfettiOverlay
+from ui.controllers.subtitle_preview_buffer import (
+    SubtitlePreviewBuffer,
+    format_segment_card_html,
+)
 
 
 class TranscribeRunner(QObject):
-    """转录任务调度与信号联动控制器"""
+    """转录任务调度与多任务并发信号联动控制器"""
 
     def __init__(self, main_window):
         super().__init__(main_window)
@@ -29,7 +32,31 @@ class TranscribeRunner(QObject):
         self.worker: Optional[TranscriptionWorker] = None
         self.start_timestamp: float = 0.0
         self.last_completed_info: Optional[dict] = None
-        self._current_file_header_html: str = ""
+        self.completed_files_map: Dict[int, dict] = {}
+
+        # 多任务并发进度与状态追踪
+        self._file_progress: Dict[int, float] = {}
+        self._active_indices: Set[int] = set()
+        self._done_count: int = 0
+        txt_subs = getattr(self.win, "txt_subtitles", None) or getattr(
+            getattr(self.win, "progress_panel", None), "txt_subtitles", None
+        )
+        multi_view = getattr(getattr(self.win, "progress_panel", None), "concurrent_sub_view", None)
+        self.preview_buffer = SubtitlePreviewBuffer(txt_subs, multi_view=multi_view)
+
+        tbl = getattr(self.win, "table_files", None) or getattr(
+            getattr(self.win, "queue_panel", None), "table_files", None
+        )
+        if tbl is not None:
+            tbl.itemSelectionChanged.connect(self._on_queue_selection_changed)
+
+    def _on_queue_selection_changed(self):
+        """当用户在左侧文件队列点击选中某行时，右侧实时字幕预览框平滑切换至该文件的字幕流"""
+        if not hasattr(self.win, "table_files") or self.win.table_files is None:
+            return
+        selected_rows = sorted({idx.row() for idx in self.win.table_files.selectedIndexes()})
+        if selected_rows:
+            self.preview_buffer.switch_focus(selected_rows[0], pinned_by_user=True)
 
     def set_ui_locked(self, locked: bool):
         """转录执行中锁定或解锁界面交互"""
@@ -47,13 +74,17 @@ class TranscribeRunner(QObject):
             self.win.queue_panel._update_queue_ui()
 
     def start(self):
-        """校验并启动全自动转录流程"""
+        """校验并启动全自动(支持多路交替并发)转录流程"""
         if not self.win.file_list:
             QMessageBox.warning(self.win, "提示", "请先添加待转录的音视频文件！")
             return
 
-        if not (self.win.chk_srt.isChecked() or self.win.chk_ass.isChecked() or
-                self.win.chk_vtt.isChecked() or self.win.chk_txt.isChecked()):
+        if not (
+            self.win.chk_srt.isChecked()
+            or self.win.chk_ass.isChecked()
+            or self.win.chk_vtt.isChecked()
+            or self.win.chk_txt.isChecked()
+        ):
             QMessageBox.warning(self.win, "提示", "请至少勾选一种字幕或文本导出格式（SRT、ASS、VTT 或 TXT）！")
             return
 
@@ -63,6 +94,12 @@ class TranscribeRunner(QObject):
             return
 
         self.win._save_settings_direct()
+
+        concurrent_tasks = (
+            int(self.win.combo_concurrency.currentData() or 0)
+            if hasattr(self.win, "combo_concurrency")
+            else 0
+        )
 
         config = ASMRTranscriberConfig(
             model_size=selected_model,
@@ -82,19 +119,32 @@ class TranscribeRunner(QObject):
             enable_karaoke=self.win.chk_karaoke.isChecked(),
             deduplicate_identical=True,
             filter_r18_moans=self.win.chk_filter_r18_moans.isChecked(),
+            max_concurrent_tasks=concurrent_tasks,
         )
 
         output_dir = self.win.edit_output_dir.text().strip() or None
 
         for r in range(self.win.table_files.rowCount()):
             self.win.table_files.setItem(r, 2, QTableWidgetItem("等待中"))
+            card = self.win.table_files.cellWidget(r, 0)
+            if card and isinstance(card, FileCardRowWidget):
+                card.update_status("等待中")
 
-        self.win.txt_subtitles.clear()
-        self._current_file_header_html = ""
+        self.preview_buffer.text_edit = self.win.txt_subtitles
+        multi_view = getattr(getattr(self.win, "progress_panel", None), "concurrent_sub_view", None)
+        if multi_view is not None:
+            self.preview_buffer.attach_multi_view(multi_view)
+        self.preview_buffer.prepare_batch(list(self.win.file_list))
+        self._file_progress = {i: 0.0 for i in range(len(self.win.file_list))}
+        self._active_indices.clear()
+        self._done_count = 0
+        self.completed_files_map.clear()
+
         if hasattr(self.win, "progress_panel") and hasattr(self.win.progress_panel, "clear_logs"):
             self.win.progress_panel.clear_logs()
         else:
             self.win.txt_logs.clear()
+
         self.win.progress_bar.setProperty("finished", "false")
         self.win.progress_bar.style().unpolish(self.win.progress_bar)
         self.win.progress_bar.style().polish(self.win.progress_bar)
@@ -126,7 +176,7 @@ class TranscribeRunner(QObject):
         try:
             self.worker.start()
             if hasattr(self.win, "update_tray_status"):
-                self.win.update_tray_status(f"转录中 (1/{len(self.win.file_list)})", "transcribing")
+                self.win.update_tray_status(f"转录中 (0/{len(self.win.file_list)})", "transcribing")
         except Exception as start_err:
             self.set_ui_locked(False)
             self.win.btn_start.setEnabled(True)
@@ -139,96 +189,93 @@ class TranscribeRunner(QObject):
         if hasattr(self.win, "waveform_visualizer"):
             self.win.waveform_visualizer.stop()
         if self.worker and self.worker.isRunning():
-            self.win.lbl_cur_status.setText("正在停止转录任务...")
+            self.win.lbl_cur_status.setText("正在停止所有并发转录任务...")
             self.worker.stop()
             self.win.btn_stop.setEnabled(False)
             if hasattr(self.win, "update_tray_status"):
                 self.win.update_tray_status("转录中止", "warning")
 
     def _format_segment_card_html(self, start: float, end: float, text: str) -> str:
-        """构建统一的字幕预览行 HTML 卡片"""
-        time_tag = f"{format_timestamp(start, 'srt')} → {format_timestamp(end, 'srt')}"
-        escaped_text = html.escape(text)
-        return (
-            f'<div style="background-color:#FFFFFF; border:1px solid #E4E4E7; border-radius:8px; padding:5px 10px; margin:4px 0;">'
-            f'<span style="background-color:#F5F3FF; color:#6D28D9; border:1px solid #DDD6FE; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:700; font-family:monospace;">{time_tag}</span> '
-            f'<span style="color:#18181B; font-size:12px; font-weight:500; margin-left:6px;">{escaped_text}</span>'
-            f'</div>'
-        )
+        """构建统一的字幕预览行 HTML 卡片 (保持向后兼容)"""
+        return format_segment_card_html(start, end, text)
 
-    @Slot(int, str)
-    def _on_worker_file_started(self, idx: int, file_path: str):
+    def _refresh_overall_progress_and_eta(self, latest_idx: int = -1, latest_msg: str = ""):
+        """根据所有文件的独立进度计算平滑加权总进度与剩余时间预估"""
+        total_files = max(1, len(self.win.file_list))
+        overall_pct = sum(self._file_progress.values()) / float(total_files)
+        overall_pct = max(0.0, min(99.0, overall_pct))
+        self.win.progress_bar.setValue(int(overall_pct))
+
+        if latest_msg:
+            self.win.lbl_cur_status.setText(latest_msg)
         if hasattr(self.win, "update_tray_status"):
-            self.win.update_tray_status(f"转录中 ({idx + 1}/{len(self.win.file_list)})", "transcribing")
-        if idx < self.win.table_files.rowCount():
-            item = QTableWidgetItem("处理中...")
-            item.setForeground(QColor("#8B5CF6"))
-            item.setTextAlignment(Qt.AlignCenter)
-            self.win.table_files.setItem(idx, 2, item)
-        fname = os.path.basename(file_path)
-        self.win.lbl_cur_status.setText(f"正在处理 ({idx + 1}/{len(self.win.file_list)}): {fname}")
-        escaped_fname = html.escape(fname)
-        header_html = (
-            f'<div style="background-color:#F4F4F5; border-left:3px solid #8B5CF6; padding:5px 10px; margin-top:8px; margin-bottom:6px; border-radius:4px;">'
-            f'<b style="color:#18181B; font-size:12px;">▶ [{idx + 1}/{len(self.win.file_list)}] {escaped_fname}</b>'
-            f'</div>'
-        )
-        self.win.txt_subtitles.append(header_html)
-        self._current_file_header_html = self.win.txt_subtitles.toHtml()
-        self.win.txt_subtitles.moveCursor(QTextCursor.End)
-        self.win.txt_subtitles.ensureCursorVisible()
-
-    @Slot(int, float, str)
-    def _on_worker_progress(self, idx: int, pct: float, msg: str):
-        self.win.progress_bar.setValue(int(pct))
-        self.win.lbl_cur_status.setText(msg)
-        if idx < self.win.table_files.rowCount():
-            card = self.win.table_files.cellWidget(idx, 0)
-            if card and isinstance(card, FileCardRowWidget):
-                card.update_progress(pct)
+            self.win.update_tray_status(
+                f"转录中 {overall_pct:.0f}% ({self._done_count}/{total_files})",
+                "transcribing",
+            )
 
         elapsed = time.time() - self.start_timestamp
         elapsed_str = time.strftime("%M:%S", time.gmtime(elapsed))
-        total_files = len(self.win.file_list)
-        total_pct = (idx + (pct / 100.0)) / total_files
-        if total_pct > 0.02:
-            est_total = elapsed / total_pct
-            remain = max(0, est_total - elapsed)
+        # 扣除每个已启动文件初始 10% 的模型准备基数，按真实流式音频推理进度计算 ETA
+        effective_progress_sum = sum(
+            (100.0 if p >= 100.0 else max(0.0, (p - 10.0) / 90.0 * 100.0))
+            for p in self._file_progress.values()
+        )
+        effective_ratio = (effective_progress_sum / float(total_files)) / 100.0
+        if effective_ratio > 0.02:
+            est_total = elapsed / effective_ratio
+            remain = max(0.0, est_total - elapsed)
             remain_str = time.strftime("%M:%S", time.gmtime(remain))
         else:
             remain_str = "--:--"
         self.win.lbl_eta.setText(f"耗时: {elapsed_str} | 预估剩余: {remain_str}")
 
+    @Slot(int, str)
+    def _on_worker_file_started(self, idx: int, file_path: str):
+        total_files = max(1, len(self.win.file_list))
+        self._active_indices.add(idx)
+        self._file_progress[idx] = max(self._file_progress.get(idx, 0.0), 2.0)
+
+        if idx < self.win.table_files.rowCount():
+            item = QTableWidgetItem("处理中...")
+            item.setForeground(QColor("#8B5CF6"))
+            item.setTextAlignment(Qt.AlignCenter)
+            self.win.table_files.setItem(idx, 2, item)
+
+        fname = os.path.basename(file_path)
+        self.preview_buffer.on_file_started(idx, total_files, fname)
+
+        self.win.lbl_cur_status.setText(f"正在处理 ({idx + 1}/{total_files}): {fname}")
+        if hasattr(self.win, "update_tray_status"):
+            self.win.update_tray_status(f"转录中 ({idx + 1}/{total_files})", "transcribing")
+
+    @Slot(int, float, str)
+    def _on_worker_progress(self, idx: int, pct: float, msg: str):
+        self._file_progress[idx] = max(0.0, min(100.0, float(pct)))
+        if idx < self.win.table_files.rowCount():
+            card = self.win.table_files.cellWidget(idx, 0)
+            if card and isinstance(card, FileCardRowWidget):
+                card.update_progress(pct)
+
+        self._refresh_overall_progress_and_eta(latest_idx=idx, latest_msg=msg)
+
     @Slot(int, float, float, str)
     def _on_worker_segment(self, idx: int, start: float, end: float, text: str):
-        self.win.txt_subtitles.append(self._format_segment_card_html(start, end, text))
-        self.win.txt_subtitles.moveCursor(QTextCursor.End)
-        self.win.txt_subtitles.ensureCursorVisible()
+        self.preview_buffer.on_segment(idx, start, end, text)
 
     @Slot(int, list)
     def _on_worker_segments_refined(self, idx: int, segments: list):
-        """后处理精修完成后，同步刷新实时字幕预览面板，确保与导出字幕文件 100% 一致"""
+        """后处理精修完成后，同步刷新该文件的字幕预览缓存"""
         if not segments:
             return
-        self.win.txt_subtitles.setUpdatesEnabled(False)
-        try:
-            if self._current_file_header_html:
-                self.win.txt_subtitles.setHtml(self._current_file_header_html)
-            else:
-                self.win.txt_subtitles.clear()
-            for seg in segments:
-                s_start = float(seg.get("start", 0.0))
-                s_end = float(seg.get("end", 0.0))
-                s_text = str(seg.get("text", "")).strip()
-                if s_text:
-                    self.win.txt_subtitles.append(self._format_segment_card_html(s_start, s_end, s_text))
-            self.win.txt_subtitles.moveCursor(QTextCursor.End)
-            self.win.txt_subtitles.ensureCursorVisible()
-        finally:
-            self.win.txt_subtitles.setUpdatesEnabled(True)
+        self.preview_buffer.on_segments_refined(idx, segments)
 
     @Slot(int, list, float)
     def _on_worker_file_finished(self, idx: int, exported_files: list, elapsed: float):
+        self._active_indices.discard(idx)
+        self._file_progress[idx] = 100.0
+        self._done_count += 1
+
         if idx < self.win.table_files.rowCount():
             item = QTableWidgetItem("✅ 已完成")
             item.setForeground(QColor("#059669"))
@@ -245,21 +292,31 @@ class TranscribeRunner(QObject):
             if not sub_path and exported_files:
                 sub_path = exported_files[0]
 
-            self.last_completed_info = {"video": v_path, "sub": sub_path}
+            info_entry = {"video": v_path, "sub": sub_path}
+            self.completed_files_map[idx] = info_entry
+            self.last_completed_info = info_entry
             self.win.last_completed_info = self.last_completed_info
+
             finish_html = (
                 f'<div style="background-color:#ECFDF5; border:1px solid #A7F3D0; color:#047857; border-radius:6px; padding:4px 10px; margin:4px 0; font-size:11px;">'
-                f'✅ <b>转录完成</b> ({elapsed:.1f}s) · 生成 {len(exported_files)} 个字幕文件'
-                f'</div>'
+                f"✅ <b>转录完成</b> ({elapsed:.1f}s) · 生成 {len(exported_files)} 个字幕文件"
+                f"</div>"
             )
-            self.win.txt_subtitles.append(finish_html)
+            self.preview_buffer.on_file_finished(idx, finish_html)
+
             if hasattr(self.win, "progress_panel") and hasattr(self.win.progress_panel, "append_log"):
                 self.win.progress_panel.append_log("💡 提示：该视频与字幕可一键送至上方「🎬 字幕内嵌与音轨预览」标签页进行压制！")
             else:
                 self.win.txt_logs.append("💡 提示：该视频与字幕可一键送至上方「🎬 字幕内嵌与音轨预览」标签页进行压制！")
 
+        self._refresh_overall_progress_and_eta()
+
     @Slot(int, str)
     def _on_worker_file_failed(self, idx: int, error_msg: str):
+        self._active_indices.discard(idx)
+        self._file_progress[idx] = 100.0
+        self._done_count += 1
+
         if idx < self.win.table_files.rowCount():
             if "取消" in error_msg or "中止" in error_msg:
                 item = QTableWidgetItem("⚠️ 已取消")
@@ -274,19 +331,20 @@ class TranscribeRunner(QObject):
         if "取消" in error_msg or "中止" in error_msg:
             fail_html = (
                 f'<div style="background-color:#FFFBEB; border:1px solid #FDE68A; color:#D97706; border-radius:6px; padding:4px 10px; margin:4px 0; font-size:11px;">'
-                f'⚠️ <b>任务已取消</b>: {escaped_err}'
-                f'</div>'
+                f"⚠️ <b>任务已取消</b>: {escaped_err}"
+                f"</div>"
             )
         else:
             fail_html = (
                 f'<div style="background-color:#FEF2F2; border:1px solid #FECACA; color:#DC2626; border-radius:6px; padding:4px 10px; margin:4px 0; font-size:11px;">'
-                f'❌ <b>转录失败</b>: {escaped_err}'
-                f'</div>'
+                f"❌ <b>转录失败</b>: {escaped_err}"
+                f"</div>"
             )
-        self.win.txt_subtitles.append(fail_html)
+        self.preview_buffer.on_file_failed(idx, fail_html)
 
     @Slot(int, int)
     def _on_worker_all_finished(self, success_count: int, fail_count: int):
+        self._active_indices.clear()
         self.set_ui_locked(False)
         self.win.btn_start.setEnabled(True)
         self.win.btn_stop.setEnabled(False)
@@ -310,7 +368,7 @@ class TranscribeRunner(QObject):
             QMessageBox.information(
                 self.win,
                 "转录完成",
-                f"🎉 批量转录完成！\n\n成功处理: {success_count} 个文件\n失败/取消: {fail_count} 个文件\n总耗时: {elapsed_str}"
+                f"🎉 批量转录完成！\n\n成功处理: {success_count} 个文件\n失败/取消: {fail_count} 个文件\n总耗时: {elapsed_str}",
             )
         else:
             if hasattr(self.win, "tray_icon") and self.win.tray_icon and self.win.tray_icon.isSystemTrayAvailable():
@@ -318,7 +376,7 @@ class TranscribeRunner(QObject):
                     "转录完成",
                     f"🎉 批量转录完成！成功: {success_count}，失败: {fail_count}，总耗时: {elapsed_str}\n点击可打开主界面查看结果",
                     QSystemTrayIcon.Information,
-                    4000
+                    4000,
                 )
 
     @Slot(str)

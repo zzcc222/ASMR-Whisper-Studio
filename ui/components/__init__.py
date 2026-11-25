@@ -9,6 +9,7 @@ from ui.components.audio_timeline import AudioSubtitleTimelineWidget
 from ui.components.collapsible_card import CollapsibleCard, RotatableChevron
 from ui.components.confetti_overlay import ConfettiOverlay, Particle
 from ui.components.sliding_stacked import SlidingStackedWidget, _DummyTabBar
+from ui.components.concurrent_subtitle_view import ConcurrentSubtitleView
 
 __all__ = [
     "FileCardRowWidget",
@@ -20,4 +21,5 @@ __all__ = [
     "Particle",
     "SlidingStackedWidget",
     "_DummyTabBar",
+    "ConcurrentSubtitleView",
 ]

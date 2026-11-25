@@ -10,6 +10,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from ..nlp.text_cleaner import clean_sub_text, is_pure_punctuation_or_noise
+from .subtitle_parser import clean_ass_text
 
 
 def _hex_to_ass_color(hex_color: str, default: str = "&H00FFE8F5") -> str:
@@ -135,6 +136,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             karaoke_parts.append(f"{{\\k{gap}}}")
 
                 dialogue_text = "".join(karaoke_parts)
+            elif seg.get("raw_ass_text") and r"{\k" in str(seg.get("raw_ass_text")) and clean_ass_text(str(seg.get("raw_ass_text"))) == raw_text.strip():
+                dialogue_text = str(seg["raw_ass_text"]).replace("\n", " ")
             else:
                 dialogue_text = raw_text
 
@@ -182,7 +185,13 @@ def save_subtitle_items(
         it["end_ms"] = e_ms
         it["start_str"] = format_timestamp(s_sec, fmt_type)
         it["end_str"] = format_timestamp(e_sec, fmt_type)
-        segments.append({"start": s_sec, "end": e_sec, "text": txt})
+        seg_entry: Dict[str, Any] = {"start": s_sec, "end": e_sec, "text": txt}
+        if "raw_ass_text" in it and it["raw_ass_text"]:
+            if clean_ass_text(str(it["raw_ass_text"])) == txt:
+                seg_entry["raw_ass_text"] = str(it["raw_ass_text"])
+            else:
+                it.pop("raw_ass_text", None)
+        segments.append(seg_entry)
 
     if ext in (".ass", ".ssa"):
         write_custom_ass(file_path, segments, karaoke=False, style=style)

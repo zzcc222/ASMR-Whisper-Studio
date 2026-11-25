@@ -113,3 +113,23 @@ def resolve_model_path(model_identifier: str) -> str:
                 return path
 
     return clean_identifier
+
+
+from core.concurrency_planner import (
+    GpuVramSnapshot,
+    normalize_nominal_vram_gb,
+    query_gpu_vram_snapshot,
+    calculate_tier_concurrency,
+    plan_effective_concurrency,
+)
+
+__all__ = [
+    "setup_cuda_dll_paths",
+    "find_local_models",
+    "resolve_model_path",
+    "GpuVramSnapshot",
+    "normalize_nominal_vram_gb",
+    "query_gpu_vram_snapshot",
+    "calculate_tier_concurrency",
+    "plan_effective_concurrency",
+]

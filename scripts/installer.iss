@@ -31,6 +31,9 @@ SetupIconFile=assets\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
 SolidCompression=yes
+LZMAUseSeparateProcess=yes
+LZMADictionarySize=262144
+LZMANumFastBytes=273
 WizardStyle=modern
 DisableProgramGroupPage=yes
 CloseApplications=yes
@@ -62,7 +65,7 @@ Source: "bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs creat
 Source: "core\*"; DestDir: "{app}\core"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc"
 Source: "Model\README.txt"; DestDir: "{app}\Model"; Flags: ignoreversion
 Source: "requirements\*"; DestDir: "{app}\requirements"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc,*.pyo,*.pyi,*.pdb"
 Source: "scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc"
 Source: "tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc"
 Source: "ui\*"; DestDir: "{app}\ui"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc"

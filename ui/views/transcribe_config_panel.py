@@ -35,6 +35,7 @@ class TranscribeConfigPanel(QObject):
         self.btn_open_model_dir = self.model_card.btn_open_model_dir
         self.combo_device = self.model_card.combo_device
         self.combo_compute = self.model_card.combo_compute
+        self.combo_concurrency = self.model_card.combo_concurrency
         self.edit_output_dir = self.model_card.edit_output_dir
         self.btn_browse_output = self.model_card.btn_browse_output
         self.chk_srt = self.model_card.chk_srt

@@ -1,26 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 ASMR Whisper Studio - 配对队列与压制控制子面板 (BurnerQueuePanel)
-负责音视频与字幕选择、智能同名/多级字幕配对(BUG-04)、批量压制队列调度、输出路径设置及压制启停与日志抽屉
+负责音视频与字幕选择、智能同名/多级字幕配对(BUG-04)、批量压制队列调度与输出路径设置。
+压制后台工作线程生命周期委托给 ui.controllers.burner_runner.BurnerRunner。
 """
 
 import os
-import time
 from typing import Optional, List, Dict
 
-from PySide6.QtCore import Qt, QObject, Slot, QUrl, QTimer
+from PySide6.QtCore import Qt, QObject, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QPushButton, QLineEdit, QProgressBar, QTextEdit, QFileDialog,
-    QMessageBox, QSystemTrayIcon
+    QPushButton, QLineEdit, QProgressBar, QTextEdit, QFileDialog
 )
 
-from core.media.sub_burner import SubBurnerConfig
 from core.subtitle.sub_matcher import find_matching_subtitle
 from core.config import SUPPORTED_MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS
 from ui.workers.burner_worker import SubBurnerWorker
-from ui.widgets import ConfettiOverlay
+from ui.controllers.burner_runner import BurnerRunner
 
 SUPPORTED_VIDEO_EXTS = "音视频文件 (*.mp4 *.mkv *.webm *.avi *.mov *.ts *.mp3 *.wav *.m4a *.flac);;所有文件 (*.*)"
 SUPPORTED_SUB_EXTS = "字幕文件 (*.ass *.srt *.vtt);;所有文件 (*.*)"
@@ -32,8 +30,6 @@ class BurnerQueuePanel(QObject):
     def __init__(self, tab_controller=None):
         super().__init__(tab_controller)
         self.tab = tab_controller
-        self.worker: Optional[SubBurnerWorker] = None
-        self.start_timestamp: float = 0.0
         self._is_burn_locked: bool = False
 
         # 批量待压制队列
@@ -41,9 +37,27 @@ class BurnerQueuePanel(QObject):
         self._batch_total: int = 0
         self._batch_completed: int = 0
 
+        self.runner = BurnerRunner(self)
+
         self._init_src_box()
         self._init_dir_widget()
         self._init_exec_bottom()
+
+    @property
+    def worker(self) -> Optional[SubBurnerWorker]:
+        return self.runner.worker
+
+    @worker.setter
+    def worker(self, val: Optional[SubBurnerWorker]):
+        self.runner.worker = val
+
+    @property
+    def start_timestamp(self) -> float:
+        return self.runner.start_timestamp
+
+    @start_timestamp.setter
+    def start_timestamp(self, val: float):
+        self.runner.start_timestamp = val
 
     def _init_src_box(self):
         """初始化媒体与字幕源文件选择区容器及批量队列横幅"""
@@ -427,204 +441,10 @@ class BurnerQueuePanel(QObject):
             self.txt_log.append("🔄 [配对模式已关闭] 已解除字幕关联，恢复原色")
 
     def _on_start_burn(self):
-        video_p = self.edit_video_path.text().strip()
-        sub_p = self.edit_sub_path.text().strip()
-
-        if not video_p or not os.path.exists(video_p):
-            QMessageBox.warning(self.tab, "提示", "请先选择有效的音视频源文件！")
-            return
-        if not sub_p or not os.path.exists(sub_p):
-            QMessageBox.warning(self.tab, "提示", "请先选择有效的字幕文件 (ASS / SRT)！")
-            return
-
-        # 若当前字幕存在在线微调未保存内容，压制前自动回写保存
-        if self.tab and hasattr(self.tab, "player_panel"):
-            sub_card = getattr(self.tab.player_panel, "sub_list_card", None)
-            if sub_card and getattr(sub_card, "_has_unsaved_changes", False):
-                self.tab.player_panel.save_current_subtitles()
-
-        out_dir = self.edit_output_dir.text().strip()
-        if not out_dir:
-            out_dir = os.path.dirname(os.path.abspath(video_p))
-
-        base_name = os.path.splitext(os.path.basename(video_p))[0]
-        style = self.tab.style_panel
-        is_hard = style.radio_hard.isChecked()
-        media_info = self.tab.player_panel.media_info
-        is_pure_audio = not media_info.get("is_video", False)
-        ext = ".mkv" if "mkv" in style.combo_container.currentText().lower() else ".mp4"
-        if not is_hard and is_pure_audio and ext == ".mp4":
-            ext = ".mkv"
-
-        suffix = "_softsub" if not is_hard else "_hardsub"
-        output_file = os.path.join(out_dir, f"{base_name}{suffix}{ext}")
-
-        counter = 1
-        while os.path.exists(output_file):
-            output_file = os.path.join(out_dir, f"{base_name}{suffix}_{counter}{ext}")
-            counter += 1
-
-        mode_str = "hard" if is_hard else "soft"
-        encoder_str = style.combo_encoder.currentData() or "h264_nvenc"
-        cq_val = style.combo_quality.currentData() or 23
-        sub_style = style.get_subtitle_style() if hasattr(style, "get_subtitle_style") else {}
-
-        config = SubBurnerConfig(
-            input_video=video_p,
-            input_subtitle=sub_p,
-            output_file=output_file,
-            mode=mode_str,
-            encoder=encoder_str,
-            cq_value=cq_val,
-            overwrite=True,
-            use_custom_style=bool(is_hard and sub_style),
-            font_family=sub_style.get("font_family", "Yu Gothic UI"),
-            font_size=int(sub_style.get("font_size", 54)),
-            sub_align=int(sub_style.get("align", 2)),
-            sub_margin_v=int(sub_style.get("margin_v", 45)),
-            sub_color_hex=sub_style.get("color_hex", "#FFFFFF"),
-            sub_outline_hex=sub_style.get("outline_hex", "#000000"),
-            sub_outline_width=float(sub_style.get("outline_width", 2.5)),
-        )
-
-        total_dur = media_info.get("duration", 0.0)
-
-        if self._batch_completed == 0:
-            self.txt_log.clear()
-        self.prog_bar.setValue(0)
-        self.lbl_status.setText("正在执行...")
-        self.lbl_stats.setText("耗时: 00:00 | 帧率: -- | 倍速: --")
-        self.start_timestamp = time.time()
-
-        self.worker = SubBurnerWorker(config=config, total_duration=total_dur)
-        self.worker.sig_started.connect(self._on_worker_started)
-        self.worker.sig_progress.connect(self._on_worker_progress)
-        self.worker.sig_log.connect(self._on_worker_log)
-        self.worker.sig_finished.connect(self._on_worker_finished)
-
-        self.tab.pause_player()
-        self.set_locked(True)
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
-
-        try:
-            self.worker.start()
-        except Exception as e:
-            self.set_locked(False)
-            self.btn_start.setEnabled(True)
-            self.btn_stop.setEnabled(False)
-            self.txt_log.append(f"❌ 启动压制任务失败: {e}")
+        self.runner.start_burn()
 
     def _on_stop_burn(self):
-        # 停止时同时清空自动后续队列以防误触发下一项
-        if self.batch_queue:
-            self.batch_queue.clear()
-            self._update_batch_ui()
-        if self.worker and self.worker.isRunning():
-            self.lbl_status.setText("正在取消...")
-            self.worker.stop()
-            self.btn_stop.setEnabled(False)
-
-    @Slot()
-    def _on_worker_started(self):
-        self.lbl_status.setText("压制进行中...")
-        self.txt_log.append("🚀 FFmpeg 压制流水线已启动...")
-        if hasattr(self.tab, "update_tray_status"):
-            self.tab.update_tray_status("压制中", "burning")
-
-    @Slot(float, str, str, str)
-    def _on_worker_progress(self, progress: float, time_str: str, speed_str: str, fps_str: str):
-        self.prog_bar.setValue(int(progress))
-        elapsed = (time.time() - self.start_timestamp) if self.start_timestamp > 0 else 0.0
-        m = int(elapsed // 60)
-        s = int(elapsed % 60)
-        self.lbl_status.setText(f"压制中: {progress:.1f}%")
-        self.lbl_stats.setText(f"耗时: {m:02d}:{s:02d} | 进度时间: {time_str} | 帧率: {fps_str} | 倍速: {speed_str}")
-        if hasattr(self.tab, "update_tray_status"):
-            self.tab.update_tray_status(f"压制 {progress:.0f}%", "burning")
-
-    @Slot(str)
-    def _on_worker_log(self, msg: str):
-        self.txt_log.append(msg)
-
-    @Slot(bool, str, str)
-    def _on_worker_finished(self, success: bool, output_file: str, message: str):
-        self.set_locked(False)
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-        elapsed = (time.time() - self.start_timestamp) if self.start_timestamp > 0 else 0.0
-        m = int(elapsed // 60)
-        s = int(elapsed % 60)
-
-        if hasattr(self.tab, "update_tray_status"):
-            self.tab.update_tray_status("待命就绪", "idle")
-
-        win = getattr(self.tab, "win", None) if self.tab else None
-        if not win and self.tab and hasattr(self.tab, "parent"):
-            win = self.tab.parent()
-        is_win_visible = win.isVisible() if (win and hasattr(win, "isVisible")) else (self.tab.isVisible() if (self.tab and hasattr(self.tab, "isVisible")) else False)
-        dialog_parent = self.tab if self.tab else win
-
-        if success:
-            self.prog_bar.setValue(100)
-            self.lbl_status.setText("压制成功完成！")
-            self.lbl_stats.setText(f"总耗时: {m:02d}:{s:02d}")
-            self.txt_log.append(f"🎉 任务完成: {message}")
-
-            # 检查批量队列是否还有后续待压制任务
-            if self.batch_queue:
-                self._batch_completed += 1
-                next_task = self.batch_queue.pop(0)
-                self._update_batch_ui()
-                self.edit_video_path.setText(next_task["video"])
-                if next_task.get("sub"):
-                    self.edit_sub_path.setText(next_task["sub"])
-                self.txt_log.append(
-                    f"⏭️ [批量队列] 自动接续下一项 ({self._batch_completed + 1}/{self._batch_total}): "
-                    f"{os.path.basename(next_task['video'])}"
-                )
-                QTimer.singleShot(250, self._on_start_burn)
-                return
-
-            total_done = self._batch_completed + 1
-            self._batch_completed = 0
-            self._batch_total = 0
-            self._update_batch_ui()
-
-            if is_win_visible and dialog_parent:
-                ConfettiOverlay.launch(dialog_parent)
-                if total_done > 1:
-                    QMessageBox.information(
-                        dialog_parent,
-                        "批量压制完成",
-                        f"🎉 批量字幕压制全部完成 (共 {total_done} 个视频)！\n\n最后一项耗时: {m:02d}:{s:02d}\n最新输出文件:\n{output_file}"
-                    )
-                else:
-                    QMessageBox.information(
-                        dialog_parent,
-                        "压制完成",
-                        f"🎉 字幕压制完成！\n\n总耗时: {m:02d}:{s:02d}\n文件已保存至:\n{output_file}"
-                    )
-            else:
-                if win and hasattr(win, "tray_manager") and win.tray_manager:
-                    win.tray_manager.show_notification("压制完成", f"🎉 字幕压制完成！总耗时: {m:02d}:{s:02d}\n文件已保存至成片目录。")
-        else:
-            self._batch_completed = 0
-            self._batch_total = 0
-            self._update_batch_ui()
-            if "取消" in message or "cancel" in message.lower() or "abort" in message.lower() or "stop" in message.lower():
-                self.lbl_status.setText("压制已取消")
-                self.txt_log.append(f"⚠️ 压制任务已取消: {message}")
-                if is_win_visible and dialog_parent:
-                    QMessageBox.information(dialog_parent, "已取消", "压制任务已成功终止。")
-            else:
-                self.lbl_status.setText("压制失败")
-                self.txt_log.append(f"❌ 压制未成功完成: {message}")
-                if is_win_visible and dialog_parent:
-                    QMessageBox.critical(dialog_parent, "压制失败", f"压制任务执行失败:\n{message}")
-                else:
-                    if win and hasattr(win, "tray_manager") and win.tray_manager:
-                        win.tray_manager.show_notification("压制失败", f"❌ 压制未成功完成: {message}", QSystemTrayIcon.Warning)
+        self.runner.stop_burn()
 
     def set_locked(self, locked: bool):
         """压制执行期间锁定或恢复交互"""
@@ -649,9 +469,9 @@ class BurnerQueuePanel(QObject):
                 self.tab.player_panel.set_locked(locked)
 
     def shutdown(self):
-        if self.worker and self.worker.isRunning():
-            try:
-                self.worker.stop()
-                self.worker.wait(800)
-            except Exception:
-                pass
+        self.runner.shutdown()
+
+
+__all__ = [
+    "BurnerQueuePanel",
+]
