@@ -45,7 +45,7 @@ class ASMRTranscriberWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName("central_window")
-        self.setWindowTitle("ASMR Whisper Studio v3.3 - 日系音声专用语音识别转录")
+        self.setWindowTitle("ASMR Whisper Studio v3.4 - 日系音声专用语音识别转录")
         self.setMinimumSize(1020, 680)
         self.resize(1920, 1080)
         self._saved_window_w = 1920

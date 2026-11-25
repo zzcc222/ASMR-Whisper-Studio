@@ -45,7 +45,7 @@ class AppHeaderBar(QFrame):
         else:
             lbl_logo.setText("🎙️")
 
-        self.lbl_app_title = QLabel("ASMR Whisper v3.3", self)
+        self.lbl_app_title = QLabel("ASMR Whisper v3.4", self)
         self.lbl_app_title.setStyleSheet("font-size: 14px; font-weight: 800; color: #18181B; letter-spacing: -0.2px;")
         brand_layout.addWidget(lbl_logo, alignment=Qt.AlignVCenter)
         brand_layout.addWidget(self.lbl_app_title, alignment=Qt.AlignVCenter)
@@ -106,7 +106,7 @@ class AppFooterBar(QFrame):
 
         self.lbl_footer_left = QLabel(self)
         self.lbl_footer_left.setStyleSheet("color: #71717A; font-size: 11px;")
-        self.lbl_footer_right = QLabel("ASMR Whisper Studio v3.3", self)
+        self.lbl_footer_right = QLabel("ASMR Whisper Studio v3.4", self)
         self.lbl_footer_right.setStyleSheet("color: #A1A1AA; font-size: 11px;")
 
         footer_layout.addWidget(self.lbl_footer_left)
